@@ -15,7 +15,11 @@ class SeckillService {
 public:
     explicit SeckillService(drogon::orm::DbClientPtr client);
 
-    // 异步秒杀：成功回调 (true,"OK")；库存不足 (false,"SOLD_OUT")；DB 异常 (false, 错误信息)。
+    // 异步秒杀，回调语义：
+    //   (true,  "OK")               下单成功
+    //   (false, "SOLD_OUT")         库存不足
+    //   (false, "DUPLICATE_ORDER")  重复下单（同一 user_id+sku_id 已存在）
+    //   (false, "DB_ERROR: ...")    系统异常
     void doSeckill(int64_t userId,
                    int64_t skuId,
                    std::function<void(bool, const std::string &)> &&callback);

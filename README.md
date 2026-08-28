@@ -17,7 +17,18 @@
 - `GET  /api/health` 健康检查。
 - `POST /api/seckill` 秒杀接口，body：`{"userId":<int64>,"skuId":<int64>}`。
 - 防超卖靠 **单行原子 `UPDATE ... WHERE stock>0`**，扣库存与落订单包在**同一个 DB 事务**里，
-  要么全成、要么全回滚。返回：`{"code":0,"msg":"success"}`；售罄 `{"code":1,"msg":"SOLD_OUT"}`（HTTP 409）。
+  要么全成、要么全回滚。
+- 返回码（HTTP 状态 + JSON）：
+
+| 场景 | HTTP | body |
+|------|------|------|
+| 下单成功 | 200 | `{"code":0,"msg":"success"}` |
+| 库存不足 | 409 | `{"code":1,"msg":"SOLD_OUT"}` |
+| 重复下单 | 409 | `{"code":1,"msg":"DUPLICATE_ORDER"}` |
+| 参数缺失/非 JSON | 400 | `{"code":400,"msg":"missing or invalid userId/skuId"}` |
+| DB 异常 | 500 | `{"code":1,"msg":"DB_ERROR: ..."}` |
+
+> 业务拒绝（409）客户端不该重试；只有 500 才值得重试。
 
 ### 阶段一的功能抉择（重点）
 
@@ -27,6 +38,10 @@
   事务保证原子性——代价是每个请求占用一条 DB 连接并持 sku 行锁到提交，这就是阶段一 QPS 被卡死的根源，
   也是后续引入 Redis / MQ 的动机。
 - **幂等**：`seckill_order` 用 `uk_user_sku(user_id, sku_id)` 唯一键，重复下单直接冲突，避免同一用户刷多单。
+  这里有个容易踩的坑：**不能裸 `INSERT`**。唯一键冲突会抛异常，若在外层 catch 里一律当 DB 错误回滚，
+  库存其实已经被步骤 1 扣掉了——更糟的是这本来是「重复下单」的业务拒绝，不该报成系统错误。
+  改用 `INSERT ... ON DUPLICATE KEY UPDATE id = id`，靠 `affectedRows()` 区分：
+  `1`=新订单，`0`=命中唯一键即重复下单（此时显式回滚，把多扣的库存还回去）。
 
 ## 构建（在 WSL / Ubuntu 22.04+ 上）
 
@@ -36,17 +51,40 @@
 # 1) 一次性安装依赖 + Drogon（约十几分钟，含 Drogon 源码编译）
 bash scripts/setup-wsl.sh
 
-# 2) 建库建表
-mysql -u root -p seckill < sql/schema.sql
-#   或 mysql 客户端里先 CREATE USER 'seckill'@'localhost' IDENTIFIED BY 'seckill';
-#   再 GRANT ALL ON seckill.* TO 'seckill'@'localhost';
+# 2) 启动 MySQL（WSL 不会自启，每次开机都要来一次）
+sudo service mysql start
 
-# 3) 编译
+# 3) 建库建表 + 建应用账号
+#    注意 Ubuntu 的 mysql-server 给 root 挂的是 auth_socket 插件，
+#    输密码登录会被拒（ERROR 1698），必须用 sudo 免密进：
+sudo mysql
+```
+```sql
+-- 建库建表
+source /mnt/d/GitHub/seckill-cpp/sql/schema.sql;
+-- 建应用专用账号（Drogon 用 TCP+密码连，不能用 auth_socket 的 root）
+source /mnt/d/GitHub/seckill-cpp/sql/init_user.sql;
+```
+```bash
+# 4) 编译
 bash scripts/build-wsl.sh
 
-# 4) 跑起来（默认读 ./config.json，监听 :8080）
+# 5) 跑起来（默认读 ./config.json，监听 :8080）
 ./build/seckill-cpp
 ```
+
+### 常见坑（WSL + MySQL）
+
+| 报错 | 原因 | 解法 |
+|------|------|------|
+| `ERROR 2002 ... socket '/var/run/mysqld/mysqld.sock'` | MySQL 服务没启动 | `sudo service mysql start` |
+| `ERROR 1698 Access denied for user 'root'@'localhost'` | root 走 `auth_socket`，只能用 OS root 身份登录 | 用 `sudo mysql`（不加 `-p`），或建专用账号 |
+| `systemctl` 报 "System has not been booted with systemd" | WSL 默认不开 systemd | 改用 `service mysql start` |
+| 程序连不上但 `sudo mysql` 能进 | 应用走 TCP 密码认证，root 是 socket 认证 | 执行 `sql/init_user.sql` 建 `seckill` 账号 |
+| `service mysql start` 卡住/失败 | `/var/run/mysqld` 目录缺失或权限错 | `sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld` |
+
+> WSL 不会自启服务，想省事可在 `~/.bashrc` 加一行：
+> `sudo service mysql status >/dev/null || sudo service mysql start`
 
 ### Drogon 版本取舍说明
 
@@ -72,6 +110,8 @@ seckill-cpp/
 │   ├── main.cc               # Drogon 启动 + 控制器/服务装配
 │   ├── controllers/          # 仅做协议转换（HTTP <-> 业务参数）
 │   └── service/              # SeckillService：事务化原子扣减（核心逻辑）
-├── sql/schema.sql            # 阶段一表结构
+├── sql/
+│   ├── schema.sql            # 阶段一表结构
+│   └── init_user.sql         # 应用专用账号（避开 root 的 auth_socket 限制）
 └── scripts/                  # setup-wsl / build-wsl / release
 ```

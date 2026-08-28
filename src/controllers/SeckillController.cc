@@ -30,9 +30,13 @@ void SeckillController::seckill(
 
             auto resp = drogon::HttpResponse::newHttpJsonResponse(root);
             if (!ok) {
-                // 库存不足用 409，其它（DB 异常等）用 500，方便上游区分重试策略。
-                resp->setStatusCode(msg == "SOLD_OUT" ? drogon::k409Conflict
-                                                      : drogon::k500InternalServerError);
+                // 用不同的 HTTP 状态码区分「业务拒绝」和「系统错误」：
+                // 业务拒绝（售罄 / 重复下单）客户端不该重试；系统错误才值得重试。
+                if (msg == "SOLD_OUT" || msg == "DUPLICATE_ORDER") {
+                    resp->setStatusCode(drogon::k409Conflict);
+                } else {
+                    resp->setStatusCode(drogon::k500InternalServerError);
+                }
             }
             callback(resp);
         });
