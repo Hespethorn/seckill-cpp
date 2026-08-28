@@ -5,8 +5,10 @@ void SeckillController::seckill(
     const drogon::HttpRequestPtr &req,
     std::function<void(const drogon::HttpResponsePtr &)> &&callback) {
     // 1) 参数校验：秒杀必须带 userId + skuId，且为 JSON 体。
-    const auto *json = req->getJsonObject();
-    if (json == nullptr || !json->isMember("userId") || !json->isMember("skuId")) {
+    //    注意：v1.9.10 起 getJsonObject() 返回 std::shared_ptr<Json::Value>（按值），
+    //    不是裸指针，故用 const auto & 接，并以 !json 判空、(*json)[...] 取值。
+    const auto &json = req->getJsonObject();
+    if (!json || !json->isMember("userId") || !json->isMember("skuId")) {
         Json::Value err;
         err["code"] = 400;
         err["msg"] = "missing or invalid userId/skuId";

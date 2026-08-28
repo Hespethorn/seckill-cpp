@@ -1,4 +1,5 @@
 #include "SeckillService.h"
+#include <drogon/orm/Result.h>
 #include <drogon/orm/Exception.h>
 
 SeckillService::SeckillService(drogon::orm::DbClientPtr client)
@@ -8,18 +9,21 @@ void SeckillService::doSeckill(
     int64_t userId,
     int64_t skuId,
     std::function<void(bool, const std::string &)> &&callback) {
-    // 开一个 DB 事务。Drogon 的 newTransactionAsync 把事务对象通过回调交给我们，
-    // 事务内用 *tx << sql << param >> callback 串联语句。
+    // 开一个 DB 事务。Drogon 的 newTransactionAsync 把事务对象(shared_ptr<Transaction>)
+    // 通过回调交给我们，事务内用 tx << sql << param >> callback 串联语句。
     db_->newTransactionAsync(
-        [userId, skuId, cb = std::move(callback)](drogon::orm::TransactionPtr &&tx) mutable {
+        [userId, skuId, cb = std::move(callback)](
+            const std::shared_ptr<drogon::orm::Transaction> &tx) mutable {
             // 步骤 1：单行原子扣减。affectedRows==0 说明 stock 已经为 0（或该行不存在），
             // 直接回滚并判为售罄——这是防超卖的关键，绝不先 SELECT 再 UPDATE。
-            *tx << "UPDATE seckill_sku SET stock = stock - 1 "
-                   "WHERE id = ? AND stock > 0"
-                << skuId
-                >> [tx, userId, skuId, cb = std::move(cb)](
-                       const drogon::orm::ResultSet &result,
-                       const std::exception_ptr &eptr) mutable {
+            // 注意：流操作符 << / >> 绑定的是 Transaction 的 shared_ptr，所以直接用 tx，
+            // 不要解引用成 *tx。
+            tx << "UPDATE seckill_sku SET stock = stock - 1 "
+                  "WHERE id = ? AND stock > 0"
+               << skuId
+               >> [tx, userId, skuId, cb = std::move(cb)](
+                      const drogon::orm::Result &result,
+                      const std::exception_ptr &eptr) mutable {
                 if (eptr) {
                     tx->rollback();
                     try {
@@ -44,15 +48,15 @@ void SeckillService::doSeckill(
                 // 导致外层 catch 把它当成「DB 错误」并回滚事务。
                 // 问题在于：此时库存行已经被步骤 1 扣掉了，事务一回滚库存会退回，
                 // 但更糟的是这个路径本该是「重复下单」的业务拒绝，不是系统错误。
-                // 这里让冲突时命中 UPDATE 空操作（affectedRows==0 或 2 需区分），
-                // 显式判为 DUPLICATE，不再回滚导致库存异常。
-                *tx << "INSERT INTO seckill_order (user_id, sku_id, status, create_time) "
-                       "VALUES (?, ?, 1, NOW()) "
-                       "ON DUPLICATE KEY UPDATE id = id"
-                    << userId << skuId
-                    >> [tx, cb = std::move(cb)](
-                           const drogon::orm::ResultSet &r2,
-                           const std::exception_ptr &eptr) mutable {
+                // 这里让冲突时命中 UPDATE 空操作（affectedRows==0 即重复单），
+                // 显式判为 DUPLICATE，并把多扣的库存还回去。
+                tx << "INSERT INTO seckill_order (user_id, sku_id, status, create_time) "
+                      "VALUES (?, ?, 1, NOW()) "
+                      "ON DUPLICATE KEY UPDATE id = id"
+                   << userId << skuId
+                   >> [tx, cb = std::move(cb)](
+                          const drogon::orm::Result &r2,
+                          const std::exception_ptr &eptr) mutable {
                         if (eptr) {
                             tx->rollback();
                             try {
