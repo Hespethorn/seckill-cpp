@@ -1,0 +1,27 @@
+{
+  "listeners": [
+    {
+      "address": "0.0.0.0",
+      "port": 8080,
+      "https": false
+    }
+  ],
+  "app": {
+    "threads_num": 4,
+    "log_path": "./logs",
+    "log_level": "warn",
+    "run_as_daemon": false
+  },
+  "db_clients": [
+    {
+      "name": "default",
+      "rdbms": "mysql",
+      "host": "127.0.0.1",
+      "port": 3306,
+      "dbname": "seckill",
+      "user": "seckill",
+      "passwd": "seckill",
+      "connection_number": 10
+    }
+  ]
+}

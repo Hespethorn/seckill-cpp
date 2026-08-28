@@ -1,0 +1,15 @@
+# 构建产物
+/build/
+/cmake-build-*/
+compile_commands.json
+
+# 日志
+/logs/
+
+# 本地配置覆盖（含密码，勿提交）
+config.local.json
+
+# 编辑器
+.idea/
+.vscode/
+*.swp
