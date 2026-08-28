@@ -9,21 +9,41 @@ void SeckillService::doSeckill(
     int64_t userId,
     int64_t skuId,
     std::function<void(bool, const std::string &)> &&callback) {
-    // 开一个 DB 事务。Drogon 的 newTransactionAsync 把事务对象(shared_ptr<Transaction>)
-    // 通过回调交给我们，事务内用 tx << sql << param >> callback 串联语句。
+    // 开一个 DB 事务。newTransactionAsync 回调拿到的是 shared_ptr<Transaction>（const 引用）。
+    //
+    // v1.9.10 事务语义（关键，见 orm_lib/src/TransactionImpl.cc 析构）：
+    //   - Transaction 没有 commit() 成员。提交发生在“最后一个 shared_ptr<Transaction> 析构”时
+    //     自动发 commit；成功才回调 setCommitCallback 注册的回调。
+    //   - rollback() 显式回滚，并置 isCommitedOrRolledback_ 标志，析构便不再自动 commit，
+    //     commitCallback 也不会再触发——所以回滚路径我们自己调业务回调，提交路径交给析构。
+    //   - operator<< 是 DbClient 的成员、Transaction 继承它，但绑定在 shared_ptr 上无效，
+    //     必须解引用成 *tx 再链式 *tx << sql << param >> cb。
     db_->newTransactionAsync(
         [userId, skuId, cb = std::move(callback)](
             const std::shared_ptr<drogon::orm::Transaction> &tx) mutable {
-            // 步骤 1：单行原子扣减。affectedRows==0 说明 stock 已经为 0（或该行不存在），
-            // 直接回滚并判为售罄——这是防超卖的关键，绝不先 SELECT 再 UPDATE。
-            // 注意：流操作符 << / >> 绑定的是 Transaction 的 shared_ptr，所以直接用 tx，
-            // 不要解引用成 *tx。
-            tx << "UPDATE seckill_sku SET stock = stock - 1 "
-                  "WHERE id = ? AND stock > 0"
-               << skuId
-               >> [tx, userId, skuId, cb = std::move(cb)](
-                      const drogon::orm::Result &result,
-                      const std::exception_ptr &eptr) mutable {
+            if (!tx) {
+                // 文档说明：超时情况下回调会拿到空的 shared_ptr。
+                cb(false, "DB_ERROR: no transaction (timeout)");
+                return;
+            }
+
+            // 提交结果回调：事务析构自动 commit 之后触发（仅 commit 成功才调）。
+            tx->setCommitCallback(
+                [cb](bool committed) mutable {
+                    if (committed)
+                        cb(true, "OK");
+                    else
+                        cb(false, "DB_ERROR: commit failed");
+                });
+
+            // 步骤 1：单行原子扣减。affectedRows==0 说明 stock 已为 0（或行不存在），
+            // 直接回滚并判为售罄——防超卖的关键，绝不先 SELECT 再 UPDATE。
+            *tx << "UPDATE seckill_sku SET stock = stock - 1 "
+                   "WHERE id = ? AND stock > 0"
+                << skuId
+                >> [tx, userId, skuId, cb = std::move(cb)](
+                       const drogon::orm::Result &result,
+                       const std::exception_ptr &eptr) mutable {
                 if (eptr) {
                     tx->rollback();
                     try {
@@ -50,9 +70,9 @@ void SeckillService::doSeckill(
                 // 但更糟的是这个路径本该是「重复下单」的业务拒绝，不是系统错误。
                 // 这里让冲突时命中 UPDATE 空操作（affectedRows==0 即重复单），
                 // 显式判为 DUPLICATE，并把多扣的库存还回去。
-                tx << "INSERT INTO seckill_order (user_id, sku_id, status, create_time) "
-                      "VALUES (?, ?, 1, NOW()) "
-                      "ON DUPLICATE KEY UPDATE id = id"
+                *tx << "INSERT INTO seckill_order (user_id, sku_id, status, create_time) "
+                       "VALUES (?, ?, 1, NOW()) "
+                       "ON DUPLICATE KEY UPDATE id = id"
                    << userId << skuId
                    >> [tx, cb = std::move(cb)](
                           const drogon::orm::Result &r2,
@@ -79,9 +99,10 @@ void SeckillService::doSeckill(
                             return;
                         }
 
-                        // 提交事务：此时库存已扣、订单已落，对外可见。
-                        tx->commit();
-                        cb(true, "OK");
+                        // 提交路径：v1.9.10 没有 commit() 成员，不手动提交。
+                        // 此处直接返回，tx 离开各层 lambda 作用域后被析构，
+                        // 析构函数自动发 commit，成功后触发上面的 setCommitCallback
+                        // → cb(true, "OK")。回滚路径已各自显式调 cb，不会重复。
                     };
             };
         });
