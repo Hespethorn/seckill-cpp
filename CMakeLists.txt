@@ -14,4 +14,7 @@ endif()
 # Drogon 提供 Drogon::Drogon target；其 orm 模块在启用 MySQL 时自动链入 mysqlclient。
 find_package(Drogon REQUIRED)
 
+# 异步日志依赖（self 实现的环形缓冲只负责排队，落盘 sink 复用 spdlog）。
+find_package(spdlog REQUIRED)
+
 add_subdirectory(src)

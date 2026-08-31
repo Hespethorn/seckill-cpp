@@ -8,7 +8,8 @@ sudo apt-get update
 sudo apt-get install -y git g++ cmake ninja-build \
     libjsoncpp-dev libboost-all-dev libssl-dev libc-ares-dev \
     libcurl4-openssl-dev uuid-dev zlib1g-dev \
-    libmariadb-dev libmariadb-dev-compat
+    libmariadb-dev libmariadb-dev-compat \
+    libspdlog-dev
 
 # 注意: Drogon 的 cmake_modules/FindMySQL.cmake 只认 mysqlclient_r / mariadbclient /
 # mariadb 这几个库名, 而 Ubuntu 的 libmysqlclient-dev 只装出 libmysqlclient.so (5.5+ 已

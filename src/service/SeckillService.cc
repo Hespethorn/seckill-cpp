@@ -1,6 +1,7 @@
 #include "SeckillService.h"
 #include <drogon/orm/Result.h>
 #include <drogon/orm/Exception.h>
+#include "logging/AsyncLogger.h"
 
 SeckillService::SeckillService(drogon::orm::DbClientPtr client)
     : db_(std::move(client)) {}
@@ -49,6 +50,10 @@ void SeckillService::doSeckill(
                 [tx, userId, skuId, cb](const drogon::orm::Result &result) {
                     if (result.affectedRows() == 0) {
                         tx->rollback();
+                        // 异步告警日志：不阻塞业务线程（环形缓冲满则丢弃，见 AsyncLogger）
+                        seckill::log::AsyncLogger::instance().log(
+                            spdlog::level::warn,
+                            "SOLD_OUT skuId=" + std::to_string(skuId));
                         cb(false, "SOLD_OUT");
                         return;
                     }
@@ -76,6 +81,10 @@ void SeckillService::doSeckill(
                                 // 重复下单：回滚把步骤 1 扣掉的库存还回去，
                                 // 否则用户每重复点一次就白白吃掉一件库存。
                                 tx->rollback();
+                                seckill::log::AsyncLogger::instance().log(
+                                    spdlog::level::warn,
+                                    "DUPLICATE_ORDER userId=" + std::to_string(userId) +
+                                        " skuId=" + std::to_string(skuId));
                                 cb(false, "DUPLICATE_ORDER");
                                 return;
                             }

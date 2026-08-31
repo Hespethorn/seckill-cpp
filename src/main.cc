@@ -1,7 +1,9 @@
 #include <drogon/drogon.h>
 #include <memory>
+#include <spdlog/spdlog.h>
 #include "controllers/HealthController.h"
 #include "controllers/SeckillController.h"
+#include "logging/AsyncLogger.h"
 #include "service/SeckillService.h"
 
 // Drogon 1.9.10 关键坑：getDbClient() 只能在 app.run() 之后调用！
@@ -35,6 +37,29 @@ int main() {
     // 注意：loadConfigFile 失败会抛异常/LOG_FATAL，程序起不来；
     // 能走到这里说明配置已成功注册，但 db 客户端对象要等 run() 才创建。
     drogon::app().loadConfigFile("./config.json");
+
+    // 异步日志：业务线程只 push 环形缓冲，落盘在后台线程（见 logging/AsyncLogger.cc）。
+    // 配置来自 config.json 的 custom_config.async_log 段（file / level）；
+    // 这是 Drogon 内置同步日志（LOG_INFO 等）之外的独立通道，秒杀热路径用它打业务告警。
+    {
+        const auto &cc = drogon::app().getCustomConfig();
+        std::string logFile = "./logs/seckill.log";
+        std::string logLevel = "warn";
+        if (cc.isMember("async_log")) {
+            const auto &al = cc["async_log"];
+            if (al.isMember("file")) {
+                logFile = al["file"].asString();
+            }
+            if (al.isMember("level")) {
+                logLevel = al["level"].asString();
+            }
+        }
+        seckill::log::AsyncLogger::instance().start(
+            logFile, spdlog::level::from_str(logLevel));
+        LOG_INFO << "async logger started: file=" << logFile
+                 << " level=" << logLevel
+                 << " capacity=" << seckill::log::AsyncLogger::kCapacity;
+    }
 
     // 路由挂载：
     //  - HealthController 是无依赖的 HttpController，由 Drogon 自动注册（/api/health），

@@ -12,6 +12,12 @@
     "log_level": "warn",
     "run_as_daemon": false
   },
+  "custom_config": {
+    "async_log": {
+      "file": "./logs/seckill.log",
+      "level": "warn"
+    }
+  },
   "db_clients": [
     {
       "name": "default",
