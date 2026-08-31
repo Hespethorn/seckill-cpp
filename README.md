@@ -12,6 +12,45 @@
 
 > 本仓库是作者个人的原创实现记录，不依赖任何外部教程专栏。
 
+## 后续目标（Roadmap）
+
+按「从 50 QPS 一路拉到 30000+」的主线推进，每个阶段都要**先暴露瓶颈 → 再针对性引入手段 → 用压测验证提升**，而不是堆功能。配套博客「秒杀系统」系列逐篇展开实现路径与权衡。
+
+### 阶段一收尾（当前 `v0.1.x`，目标 ~50 QPS 基线）
+
+- [x] 事务化原子扣减（`UPDATE ... WHERE stock>0`）+ 幂等下单（`uk_user_sku`）
+- [x] 冒烟压测脚本 `scripts/smoke-seckill.sh`（并发抢购 + MySQL 核对不超卖）
+- [ ] 登录 / 注册模块（jwt-cpp + Redis 会话，自实现鉴权）
+- [ ] JMeter 基线压测：100 用户抢 10 件，量化"行锁串行"这个阶段一瓶颈
+- [ ] 应用层锁（`std::mutex` / 自旋 / 原子）优化重复下单
+
+### 阶段二：Redis 缓存层（数千 QPS）
+
+- [ ] 引入 redis-plus-plus，商品列表 / 详情接口加缓存
+- [ ] 缓存一致性：Cache-Aside / 延迟双删，讲清取舍
+- [ ] 库存预热 + 动态 TTL；防穿透（空值 / 布隆过滤器）、防击穿、防雪崩
+- [ ] 本地缓存（LRU）多级缓存
+- [ ] JMeter 压测验收：从 ~50 拉到数千 QPS
+
+### 阶段三：MQ 削峰填谷（数万 QPS）
+
+- [ ] Docker 装 RabbitMQ，AMQP-CPP 接入
+- [ ] 秒杀异步下单：接口只"写请求 + 返回排队中"，落库交给消费者
+- [ ] 消费者可靠性：手动 ACK + 死信队列；生产者可靠性：Confirm + Return
+- [ ] 秒杀结果查询 + SSE / WebSocket 实时通知
+- [ ] JMeter 压测验收：数千 → 数万 QPS
+
+### 阶段四：Lua 原子预扣 + 防刷限流 + 微服务（30000+ QPS）
+
+- [ ] 库存预热到 Redis，Lua 脚本原子扣减（行锁 → 内存原子操作）
+- [ ] Redis Lua 一人一单限制、库存售罄快速失败
+- [ ] 防刷 / 限流：固定窗口 / 滑动窗口 / 令牌桶 / 漏桶（自实现中间件）
+- [ ] 一次性秒杀令牌：防脚本刷单、按库存控制令牌发放量
+- [ ] 微服务拆分 + 服务治理（brpc / etcd / 自写网关与熔断）
+- [ ] JMeter 压测验收：数万 → 30000+ QPS
+
+> 每个阶段的验收标准都有一条硬指标：**压测 QPS 提升一个量级，且不超卖、不重复下单**——这是全程不变的底线。
+
 ## 当前版本（v0.1.x）做了什么
 
 - `GET  /api/health` 健康检查。
@@ -19,7 +58,13 @@
 - 防超卖靠 **单行原子 `UPDATE ... WHERE stock>0`**，扣库存与落订单包在**同一个 DB 事务**里，
   要么全成、要么全回滚。
 
-curl -s -X POST localhost:8080/api/seckill -H 'Content-Type: application/json' -d '{"userId":1,"skuId":1}'
+调用示例：
+
+```bash
+curl -s -X POST localhost:8080/api/seckill \
+  -H 'Content-Type: application/json' \
+  -d '{"userId":1,"skuId":1}'
+```
 
 - 返回码（HTTP 状态 + JSON）：
 
