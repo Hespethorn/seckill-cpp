@@ -4,16 +4,37 @@
 #include "controllers/SeckillController.h"
 #include "service/SeckillService.h"
 
+// Drogon 1.9.10 关键坑：getDbClient() 只能在 app.run() 之后调用！
+// 官方文档原话: "This method cannot be called before running app.run(),
+// otherwise the user will get an empty shared_ptr."
+//
+// 原因：config.json 里的 db_clients 在 loadConfigFile 阶段只是"注册了配置"，
+// 真正的 DbClient 对象（含连接池）是 run() 时才创建的。main() 里提前
+// getDbClient("default") 必然拿到空 shared_ptr -> 首个请求在
+// SeckillService::doSeckill 第一行 db_->... 空指针解引用 -> SIGSEGV。
+//
+// 解法：把"取客户端 + 组装服务"延迟到第一个 /api/seckill 请求到达时
+// （handler 执行必然在 run() 之后），用 static 局部变量保证只初始化一次、
+// 线程安全（C++11 magic static）。
+std::shared_ptr<SeckillController> getSeckillController() {
+    static std::shared_ptr<SeckillController> ctrl = [] {
+        auto db = drogon::app().getDbClient("default");
+        if (!db) {
+            LOG_FATAL << "getDbClient(\"default\") returned null after run(): "
+                         "check db_clients in config.json and Drogon MySQL support.";
+            exit(1);
+        }
+        return std::make_shared<SeckillController>(
+            std::make_shared<SeckillService>(db));
+    }();
+    return ctrl;
+}
+
 int main() {
     // 读取 config.json：其中声明了监听端口、线程数，以及名为 "default" 的 MySQL 客户端。
+    // 注意：loadConfigFile 失败会抛异常/LOG_FATAL，程序起不来；
+    // 能走到这里说明配置已成功注册，但 db 客户端对象要等 run() 才创建。
     drogon::app().loadConfigFile("./config.json");
-
-    // 从 Drogon 托管的连接池取 DB 客户端，注入到业务服务里。
-    // 这里故意把“数据访问”和“HTTP 路由”拆开：controller 只负责协议转换，
-    // 真正的秒杀逻辑在 SeckillService，方便后续替换存储层（Redis/MQ）而不动路由。
-    auto db = drogon::app().getDbClient("default");
-    auto seckillSvc = std::make_shared<SeckillService>(db);
-    auto seckillCtrl = std::make_shared<SeckillController>(seckillSvc);
 
     // 路由挂载：
     //  - HealthController 是无依赖的 HttpController，由 Drogon 自动注册（/api/health），
@@ -28,9 +49,10 @@ int main() {
     //    无占位符的路由一律用两参形式，需要 path 时再走带 {} 的路由 + 三参（path 来自占位符）。
     drogon::app().registerHandler(
         "/api/seckill",
-        [seckillCtrl](const drogon::HttpRequestPtr &req,
-                      std::function<void(const drogon::HttpResponsePtr &)> &&callback) {
-            seckillCtrl->seckill(req, std::move(callback));
+        [](const drogon::HttpRequestPtr &req,
+           std::function<void(const drogon::HttpResponsePtr &)> &&callback) {
+            // run() 之后才能安全取 db client（见 getSeckillController 注释）
+            getSeckillController()->seckill(req, std::move(callback));
         },
         {drogon::Post});
 

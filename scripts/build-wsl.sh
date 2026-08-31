@@ -6,4 +6,5 @@ cd "$(dirname "$0")/.."
 cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j"$(nproc)"
 
-echo "==> 构建产物: ./build/seckill-cpp"
+echo "==> 构建产物: ./build/src/seckill-cpp"
+

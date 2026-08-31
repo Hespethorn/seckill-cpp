@@ -70,10 +70,21 @@ source /mnt/d/GitHub/seckill-cpp/sql/init_user.sql;
 bash scripts/build-wsl.sh
 
 # 5) 跑起来（默认读 ./config.json，监听 :8080）
-./build/seckill-cpp
+./build/src/seckill-cpp
 ```
 
-### 常见坑（WSL + MySQL）
+### 调试与验证脚本
+
+仓库附带两个辅助脚本（WSL 里用 `bash scripts/xxx.sh` 调用，注意本机 `.sh` 可能被关联到 Node.js，别直接 `./xxx.sh`）：
+
+| 脚本 | 用途 |
+|------|------|
+| `scripts/debug-wsl.sh check` | 一键体检：MySQL 连通、表数据、Drogon 是否带 MySQL 后端、可执行文件实际链接的库 |
+| `scripts/debug-wsl.sh asan` | ASan/UBSan 构建并启动，精确定位崩溃行（SIGSEGV 首选） |
+| `scripts/debug-wsl.sh gdb` | Debug(-g) 构建进 gdb，看带行号 bt |
+| `scripts/smoke-seckill.sh [并发] [库存] [skuId]` | 冒烟压测：N 个用户并发抢购 + MySQL 核对不超卖，默认 `100 10 1` |
+
+### 常见坑（WSL + MySQL + Drogon）
 
 | 报错 | 原因 | 解法 |
 |------|------|------|
@@ -82,6 +93,7 @@ bash scripts/build-wsl.sh
 | `systemctl` 报 "System has not been booted with systemd" | WSL 默认不开 systemd | 改用 `service mysql start` |
 | 程序连不上但 `sudo mysql` 能进 | 应用走 TCP 密码认证，root 是 socket 认证 | 执行 `sql/init_user.sql` 建 `seckill` 账号 |
 | `service mysql start` 卡住/失败 | `/var/run/mysqld` 目录缺失或权限错 | `sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld` |
+| 服务正常启动，首个请求 SIGSEGV，崩在 `SeckillService::doSeckill` 的 `db_->...` | **`getDbClient("default")` 在 `app.run()` 之前调用必然返回空 shared_ptr**（Drogon 1.9.10 的 db 客户端要 run() 才创建，见 `main.cc` 注释） | 把 `getDbClient` + 组装 Service 的代码延迟到 handler 里（static 延迟初始化），不要在 `main()` 里提前取 |
 
 > WSL 不会自启服务，想省事可在 `~/.bashrc` 加一行：
 > `sudo service mysql status >/dev/null || sudo service mysql start`
@@ -100,6 +112,9 @@ bash scripts/build-wsl.sh
 bash scripts/release.sh 0.1.0
 ```
 
+> 注：`release.sh` 为发布辅助脚本（构建 -> 提交 -> 打 tag -> 推 GitHub），按需从历史版本取回：
+> `git show HEAD:scripts/release.sh > scripts/release.sh && chmod +x scripts/release.sh`
+
 ## 目录结构
 
 ```
@@ -107,11 +122,15 @@ seckill-cpp/
 ├── CMakeLists.txt            # find_package(Drogon)
 ├── config.json               # 监听端口 + MySQL 客户端("default")
 ├── src/
-│   ├── main.cc               # Drogon 启动 + 控制器/服务装配
+│   ├── main.cc               # Drogon 启动 + 控制器/服务装配（getDbClient 延迟到 handler）
 │   ├── controllers/          # 仅做协议转换（HTTP <-> 业务参数）
 │   └── service/              # SeckillService：事务化原子扣减（核心逻辑）
 ├── sql/
 │   ├── schema.sql            # 阶段一表结构
 │   └── init_user.sql         # 应用专用账号（避开 root 的 auth_socket 限制）
-└── scripts/                  # setup-wsl / build-wsl / release
+└── scripts/
+    ├── setup-wsl.sh          # 一次性装依赖 + Drogon（含 MySQL 后端）
+    ├── build-wsl.sh          # CMake 配置 + 编译
+    ├── debug-wsl.sh          # 排错三件套：check（体检）/ asan（定位）/ gdb（带行号 bt）
+    └── smoke-seckill.sh      # 冒烟压测：并发抢购 + MySQL 验证不超卖
 ```
