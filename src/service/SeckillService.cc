@@ -72,7 +72,7 @@ void SeckillService::doSeckill(
                         "INSERT INTO seckill_order (user_id, sku_id, status, "
                         "create_time) VALUES (?, ?, 1, NOW()) "
                         "ON DUPLICATE KEY UPDATE id = id",
-                        [tx, cb](const drogon::orm::Result &r2) {
+                        [tx, userId, skuId, cb](const drogon::orm::Result &r2) {
                             // affectedRows 语义（MySQL）：
                             //   1 = 真的插入了一条新订单
                             //   0 = 命中唯一键、走的 UPDATE 但值没变 = 重复下单
