@@ -3,7 +3,11 @@
 /cmake-build-*/
 compile_commands.json
 
-# 日志
+# 根目录构建产物（某些构建配置会把二进制直接吐到仓库根）
+/seckill-cpp
+
+# 运行期生成目录
+/uploads/
 /logs/
 
 # 本地配置覆盖（含密码，勿提交）
