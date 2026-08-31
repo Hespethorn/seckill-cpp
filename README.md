@@ -3,12 +3,12 @@
 用 **C++ / Drogon** 从零搭建的高并发秒杀系统实战项目，是本博客「秒杀系统」系列的配套源码仓库。
 重点不在堆功能，而是每一步的**项目思考、实现路径，以及关键功能抉择上的权衡**。仓库按文章节奏分阶段演进：
 
-| 阶段 | 版本 | 手段 | 预期 QPS | 本仓库对应 |
-|------|------|------|----------|------------|
-| 1 | `v0.1.x` | 直接打数据库（事务 + 原子扣减） | ~50 | **当前** |
-| 2 | `v0.2.x` | Redis 预扣减 + 异步落库 | 数千 | 待实现 |
-| 3 | `v0.3.x` | MQ 削峰填谷 | 数万 | 待实现 |
-| 4 | `v1.0.0` | 微服务 + 限流/治理 | 30000+ | 待实现 |
+| 阶段 | 版本       | 手段                | 预期 QPS | 本仓库对应  |
+| -- | -------- | ----------------- | ------ | ------ |
+| 1  | `v0.1.x` | 直接打数据库（事务 + 原子扣减） | \~50   | **当前** |
+| 2  | `v0.2.x` | Redis 预扣减 + 异步落库  | 数千     | 待实现    |
+| 3  | `v0.3.x` | MQ 削峰填谷           | 数万     | 待实现    |
+| 4  | `v1.0.0` | 微服务 + 限流/治理       | 30000+ | 待实现    |
 
 > 本仓库是作者个人的原创实现记录，不依赖任何外部教程专栏。
 
@@ -16,9 +16,9 @@
 
 按「从 50 QPS 一路拉到 30000+」的主线推进，每个阶段都要**先暴露瓶颈 → 再针对性引入手段 → 用压测验证提升**，而不是堆功能。配套博客「秒杀系统」系列逐篇展开实现路径与权衡，完整目录见博客 `source/_posts/Seckill/Cpp/内容规划.md`（Master Plan）。
 
-版本与阶段对应：**`v0.1.x`（阶段一）→ `v0.2.x`（阶段二）→ `v0.3.x`（阶段三）→ `v1.0.0`（阶段四）**。
+版本与阶段对应：**`v0.1.x`（阶段一）→** **`v0.2.x`（阶段二）→** **`v0.3.x`（阶段三）→** **`v1.0.0`（阶段四）**。
 
-### 阶段一：地基 + 登录 + 基础秒杀（`v0.1.x`，目标 ~50 QPS 基线）
+### 阶段一：地基 + 登录 + 基础秒杀（`v0.1.x`，目标 \~50 QPS 基线）
 
 - [x] 数据库表设计（`seckill_sku` 原子扣减 + `seckill_order` 幂等键）
 - [x] Drogon 项目搭建 + 接入 MySQL（内置 ORM DbClient，`getDbClient` 延迟到 handler）
@@ -35,7 +35,7 @@
 - [ ] 缓存一致性：Cache-Aside / 延迟双删，讲清取舍
 - [ ] 库存预热 + 动态 TTL；防穿透（空值 / 布隆过滤器）、防击穿、防雪崩
 - [ ] 本地缓存（LRU）多级缓存
-- [ ] JMeter 压测验收：从 ~50 拉到数千 QPS
+- [ ] JMeter 压测验收：从 \~50 拉到数千 QPS
 
 ### 阶段三：MQ 削峰填谷（`v0.3.x`，数万 QPS）
 
@@ -60,7 +60,7 @@
 
 - `GET  /api/health` 健康检查。
 - `POST /api/seckill` 秒杀接口，body：`{"userId":<int64>,"skuId":<int64>}`。
-- 防超卖靠 **单行原子 `UPDATE ... WHERE stock>0`**，扣库存与落订单包在**同一个 DB 事务**里，
+- 防超卖靠 **单行原子** **`UPDATE ... WHERE stock>0`**，扣库存与落订单包在**同一个 DB 事务**里，
   要么全成、要么全回滚。
 
 调用示例：
@@ -73,13 +73,13 @@ curl -s -X POST localhost:8080/api/seckill \
 
 - 返回码（HTTP 状态 + JSON）：
 
-| 场景 | HTTP | body |
-|------|------|------|
-| 下单成功 | 200 | `{"code":0,"msg":"success"}` |
-| 库存不足 | 409 | `{"code":1,"msg":"SOLD_OUT"}` |
-| 重复下单 | 409 | `{"code":1,"msg":"DUPLICATE_ORDER"}` |
-| 参数缺失/非 JSON | 400 | `{"code":400,"msg":"missing or invalid userId/skuId"}` |
-| DB 异常 | 500 | `{"code":1,"msg":"DB_ERROR: ..."}` |
+| 场景          | HTTP | body                                                   |
+| ----------- | ---- | ------------------------------------------------------ |
+| 下单成功        | 200  | `{"code":0,"msg":"success"}`                           |
+| 库存不足        | 409  | `{"code":1,"msg":"SOLD_OUT"}`                          |
+| 重复下单        | 409  | `{"code":1,"msg":"DUPLICATE_ORDER"}`                   |
+| 参数缺失/非 JSON | 400  | `{"code":400,"msg":"missing or invalid userId/skuId"}` |
+| DB 异常       | 500  | `{"code":1,"msg":"DB_ERROR: ..."}`                     |
 
 > 业务拒绝（409）客户端不该重试；只有 500 才值得重试。
 
@@ -91,7 +91,7 @@ curl -s -X POST localhost:8080/api/seckill \
   事务保证原子性——代价是每个请求占用一条 DB 连接并持 sku 行锁到提交，这就是阶段一 QPS 被卡死的根源，
   也是后续引入 Redis / MQ 的动机。
 - **幂等**：`seckill_order` 用 `uk_user_sku(user_id, sku_id)` 唯一键，重复下单直接冲突，避免同一用户刷多单。
-  这里有个容易踩的坑：**不能裸 `INSERT`**。唯一键冲突会抛异常，若在外层 catch 里一律当 DB 错误回滚，
+  这里有个容易踩的坑：**不能裸** **`INSERT`**。唯一键冲突会抛异常，若在外层 catch 里一律当 DB 错误回滚，
   库存其实已经被步骤 1 扣掉了——更糟的是这本来是「重复下单」的业务拒绝，不该报成系统错误。
   改用 `INSERT ... ON DUPLICATE KEY UPDATE id = id`，靠 `affectedRows()` 区分：
   `1`=新订单，`0`=命中唯一键即重复下单（此时显式回滚，把多扣的库存还回去）。
@@ -112,12 +112,14 @@ sudo service mysql start
 #    输密码登录会被拒（ERROR 1698），必须用 sudo 免密进：
 sudo mysql
 ```
+
 ```sql
 -- 建库建表
 source /mnt/d/GitHub/seckill-cpp/sql/schema.sql;
 -- 建应用专用账号（Drogon 用 TCP+密码连，不能用 auth_socket 的 root）
 source /mnt/d/GitHub/seckill-cpp/sql/init_user.sql;
 ```
+
 ```bash
 # 4) 编译
 bash scripts/build-wsl.sh
@@ -153,23 +155,23 @@ SHOW PROCESSLIST;
 
 仓库附带两个辅助脚本（WSL 里用 `bash scripts/xxx.sh` 调用，注意本机 `.sh` 可能被关联到 Node.js，别直接 `./xxx.sh`）：
 
-| 脚本 | 用途 |
-|------|------|
-| `scripts/debug-wsl.sh check` | 一键体检：MySQL 连通、表数据、Drogon 是否带 MySQL 后端、可执行文件实际链接的库 |
-| `scripts/debug-wsl.sh asan` | ASan/UBSan 构建并启动，精确定位崩溃行（SIGSEGV 首选） |
-| `scripts/debug-wsl.sh gdb` | Debug(-g) 构建进 gdb，看带行号 bt |
-| `scripts/smoke-seckill.sh [并发] [库存] [skuId]` | 冒烟压测：N 个用户并发抢购 + MySQL 核对不超卖，默认 `100 10 1` |
+| 脚本                                           | 用途                                                |
+| -------------------------------------------- | ------------------------------------------------- |
+| `scripts/debug-wsl.sh check`                 | 一键体检：MySQL 连通、表数据、Drogon 是否带 MySQL 后端、可执行文件实际链接的库 |
+| `scripts/debug-wsl.sh asan`                  | ASan/UBSan 构建并启动，精确定位崩溃行（SIGSEGV 首选）              |
+| `scripts/debug-wsl.sh gdb`                   | Debug(-g) 构建进 gdb，看带行号 bt                         |
+| `scripts/smoke-seckill.sh [并发] [库存] [skuId]` | 冒烟压测：N 个用户并发抢购 + MySQL 核对不超卖，默认 `100 10 1`        |
 
 ### 常见坑（WSL + MySQL + Drogon）
 
-| 报错 | 原因 | 解法 |
-|------|------|------|
-| `ERROR 2002 ... socket '/var/run/mysqld/mysqld.sock'` | MySQL 服务没启动 | `sudo service mysql start` |
-| `ERROR 1698 Access denied for user 'root'@'localhost'` | root 走 `auth_socket`，只能用 OS root 身份登录 | 用 `sudo mysql`（不加 `-p`），或建专用账号 |
-| `systemctl` 报 "System has not been booted with systemd" | WSL 默认不开 systemd | 改用 `service mysql start` |
-| 程序连不上但 `sudo mysql` 能进 | 应用走 TCP 密码认证，root 是 socket 认证 | 执行 `sql/init_user.sql` 建 `seckill` 账号 |
-| `service mysql start` 卡住/失败 | `/var/run/mysqld` 目录缺失或权限错 | `sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld` |
-| 服务正常启动，首个请求 SIGSEGV，崩在 `SeckillService::doSeckill` 的 `db_->...` | **`getDbClient("default")` 在 `app.run()` 之前调用必然返回空 shared_ptr**（Drogon 1.9.10 的 db 客户端要 run() 才创建，见 `main.cc` 注释） | 把 `getDbClient` + 组装 Service 的代码延迟到 handler 里（static 延迟初始化），不要在 `main()` 里提前取 |
+| 报错                                                              | 原因                                                                                                                             | 解法                                                                            |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------- |
+| `ERROR 2002 ... socket '/var/run/mysqld/mysqld.sock'`           | MySQL 服务没启动                                                                                                                    | `sudo service mysql start`                                                    |
+| `ERROR 1698 Access denied for user 'root'@'localhost'`          | root 走 `auth_socket`，只能用 OS root 身份登录                                                                                          | 用 `sudo mysql`（不加 `-p`），或建专用账号                                                |
+| `systemctl` 报 "System has not been booted with systemd"         | WSL 默认不开 systemd                                                                                                               | 改用 `service mysql start`                                                      |
+| 程序连不上但 `sudo mysql` 能进                                          | 应用走 TCP 密码认证，root 是 socket 认证                                                                                                  | 执行 `sql/init_user.sql` 建 `seckill` 账号                                         |
+| `service mysql start` 卡住/失败                                     | `/var/run/mysqld` 目录缺失或权限错                                                                                                     | `sudo mkdir -p /var/run/mysqld && sudo chown mysql:mysql /var/run/mysqld`     |
+| 服务正常启动，首个请求 SIGSEGV，崩在 `SeckillService::doSeckill` 的 `db_->...` | **`getDbClient("default")`** **在** **`app.run()`** **之前调用必然返回空 shared\_ptr**（Drogon 1.9.10 的 db 客户端要 run() 才创建，见 `main.cc` 注释） | 把 `getDbClient` + 组装 Service 的代码延迟到 handler 里（static 延迟初始化），不要在 `main()` 里提前取 |
 
 > WSL 不会自启服务，想省事可在 `~/.bashrc` 加一行：
 > `sudo service mysql status >/dev/null || sudo service mysql start`
@@ -200,3 +202,4 @@ seckill-cpp/
     ├── debug-wsl.sh          # 排错三件套：check（体检）/ asan（定位）/ gdb（带行号 bt）
     └── smoke-seckill.sh      # 冒烟压测：并发抢购 + MySQL 验证不超卖
 ```
+
