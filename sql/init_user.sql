@@ -4,23 +4,31 @@
 -- 插件，只允许「操作系统 root 身份」登录，程序用 TCP + 密码连会被拒（ERROR 1698）。
 -- 这里建一个走 mysql_native_password 的专用账号，专给应用程序用。
 --
+-- 为什么一次建三个 host：Drogon 的 MySQL 客户端连接时，host 到底被当成
+-- 'localhost'（Unix socket）还是 '127.0.0.1'（TCP）取决于客户端库与 MySQL 的
+-- 反查行为，错误里出现哪个 host 就对应哪个账号。三个都建上，无论 socket / TCP /
+-- 反查成 localhost 都能匹配，避免再踩 ERROR 1045。MySQL 的 bind-address 默认仍是
+-- 127.0.0.1，所以网络层只接受本机连接，'seckill'@'%' 不会暴露到外网。
+--
 -- 权限按最小够用原则：只给 seckill 库，不给全局权限，也不给 WITH GRANT OPTION。
 
--- 关键坑：Drogon 的 MySQL 客户端在 host=127.0.0.1 时仍可能走 Unix socket 连 'localhost'
--- （尤其用 libmariadb 客户端时），而 'seckill'@'127.0.0.1' 账号只匹配 TCP 连接，
--- socket 连接会被当成 'seckill'@'localhost' -> ERROR 1045 Access denied。
--- 因此两个 host 都建上：'127.0.0.1' 覆盖 TCP，'localhost' 覆盖 socket。
+-- 先清掉旧账号（含可能残留的错误密码），保证下面建出来的密码一定是对的。
+DROP USER IF EXISTS 'seckill'@'127.0.0.1';
+DROP USER IF EXISTS 'seckill'@'localhost';
+DROP USER IF EXISTS 'seckill'@'%';
 
-CREATE USER IF NOT EXISTS 'seckill'@'127.0.0.1'
+CREATE USER 'seckill'@'127.0.0.1'
   IDENTIFIED WITH mysql_native_password BY 'seckill';
-
-CREATE USER IF NOT EXISTS 'seckill'@'localhost'
+CREATE USER 'seckill'@'localhost'
+  IDENTIFIED WITH mysql_native_password BY 'seckill';
+CREATE USER 'seckill'@'%'
   IDENTIFIED WITH mysql_native_password BY 'seckill';
 
 GRANT SELECT, INSERT, UPDATE, DELETE ON seckill.* TO 'seckill'@'127.0.0.1';
 GRANT SELECT, INSERT, UPDATE, DELETE ON seckill.* TO 'seckill'@'localhost';
+GRANT SELECT, INSERT, UPDATE, DELETE ON seckill.* TO 'seckill'@'%';
 
 FLUSH PRIVILEGES;
 
--- 验证：应看到 seckill@127.0.0.1 和 seckill@localhost 两行，plugin 均为 mysql_native_password
+-- 验证：应看到 seckill 的 127.0.0.1 / localhost / % 三行，plugin 均为 mysql_native_password
 SELECT user, host, plugin FROM mysql.user WHERE user = 'seckill';
