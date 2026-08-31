@@ -18,6 +18,9 @@
 - `POST /api/seckill` 秒杀接口，body：`{"userId":<int64>,"skuId":<int64>}`。
 - 防超卖靠 **单行原子 `UPDATE ... WHERE stock>0`**，扣库存与落订单包在**同一个 DB 事务**里，
   要么全成、要么全回滚。
+
+curl -s -X POST localhost:8080/api/seckill -H 'Content-Type: application/json' -d '{"userId":1,"skuId":1}'
+
 - 返回码（HTTP 状态 + JSON）：
 
 | 场景 | HTTP | body |
@@ -104,16 +107,6 @@ bash scripts/build-wsl.sh
 通过 `>> [](const ResultSet&, const std::exception_ptr&)` 组合回调处理结果与异常。
 若你使用开启了 C++20 协程的新版 Drogon，`commit()` 会返回 `drogon::Task<bool>`，需 `co_await` 才能生效；
 届时把 `SeckillService.cc` 里的提交改写为协程版本即可（会在对应阶段文章里展开）。
-
-## 发布每个版本
-
-```bash
-# 在 WSL 上：构建 -> 提交 -> 打 tag -> 推 GitHub
-bash scripts/release.sh 0.1.0
-```
-
-> 注：`release.sh` 为发布辅助脚本（构建 -> 提交 -> 打 tag -> 推 GitHub），按需从历史版本取回：
-> `git show HEAD:scripts/release.sh > scripts/release.sh && chmod +x scripts/release.sh`
 
 ## 目录结构
 
