@@ -76,6 +76,29 @@ bash scripts/build-wsl.sh
 ./build/src/seckill-cpp
 ```
 
+### 快速查看数据（每次进库用这一条）
+
+```bash
+mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill
+```
+
+进去之后常用的查看语句：
+
+```sql
+-- 库存真相源：剩余/总量/活动时间
+SELECT id, name, stock, total, start_time, end_time FROM seckill_sku;
+
+-- 订单：谁买到了、有没有重复
+SELECT id, user_id, sku_id, status, create_time FROM seckill_order;
+
+-- 扣减一致性：卖出件数 与 订单数 应相等（无超卖无漏单）
+SELECT (SELECT total FROM seckill_sku WHERE id=1) - (SELECT stock FROM seckill_sku WHERE id=1) AS sold,
+       (SELECT COUNT(*) FROM seckill_order WHERE sku_id=1) AS orders;
+
+-- 当前连接（看 Drogon 连接池是否建上）
+SHOW PROCESSLIST;
+```
+
 ### 调试与验证脚本
 
 仓库附带两个辅助脚本（WSL 里用 `bash scripts/xxx.sh` 调用，注意本机 `.sh` 可能被关联到 Node.js，别直接 `./xxx.sh`）：
