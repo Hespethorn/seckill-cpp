@@ -22,11 +22,14 @@ int main() {
     //  - SeckillController 需要注入 SeckillService（没有默认构造器，无法自动注册），
     //    因此用 registerHandler 手动挂 /api/seckill，lambda 把请求转交给 seckillCtrl 实例。
     //    registerHandler 会持有该 lambda，故按值捕获 seckillCtrl 以延长其生命周期。
+    //    注意：handler 必须是两参形式 (req, callback)。Drogon v1.9.10 的 HttpBinder 对
+    //    三参形式 (req, callback, path) 且路由无 {} 占位符时，会按 req->as<std::string>()
+    //    兜底绑定第 3 个参数，而 fromRequest<std::string> 未特化 -> 运行时 exit(1)。
+    //    无占位符的路由一律用两参形式，需要 path 时再走带 {} 的路由 + 三参（path 来自占位符）。
     drogon::app().registerHandler(
         "/api/seckill",
         [seckillCtrl](const drogon::HttpRequestPtr &req,
-                      std::function<void(const drogon::HttpResponsePtr &)> &&callback,
-                      const std::string & /*path*/) {
+                      std::function<void(const drogon::HttpResponsePtr &)> &&callback) {
             seckillCtrl->seckill(req, std::move(callback));
         },
         {drogon::Post});
