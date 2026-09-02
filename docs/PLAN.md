@@ -160,20 +160,21 @@
 | --- | --- | --- | --- |
 | Redis 客户端 | `redis-plus-plus` | **Drogon 内置 `nosql::RedisClient`** | `redis-plus-plus` 是**同步** API。Drogon 的 handler 跑在 IO 线程（`threads_num=4`），在 IO 线程里同步等一次 Redis 往返，会把这个线程上排队的请求全部卡住——这是结构性问题。内置客户端异步、与框架事件循环同构，且零额外依赖（只需 `libhiredis-dev`） |
 | JWT 签发 | `jwt-cpp` | **自实现 HS256**（`service/Jwt.*`） | HS256 全内涵是「base64url(头).base64url(体).base64url(HMAC-SHA256)」，三个动作各十几行，用已在场的 OpenSSL 就能写。引 header-only 库要 `FetchContent` 从 GitHub 拉，WSL 网络是额外风险点；自写则编译期零外部依赖、签名过程可审计 |
-| 短信发送 | （原定未涉及 SDK） | **直连腾讯云 API 3.0 + 自实现 TC3-HMAC-SHA256 签名** | 官方 `tencentcloud-sdk-cpp` 要拉 core 模块（数百文件、依赖 protobuf 等），编译十几分钟；需要的只是「签一个 TC3 签名 + POST 一段 JSON」。自实现约 120 行，依赖只有 `libcurl` + `OpenSSL`——这两个本来就在装 |
+| 短信发送 | 直连腾讯云 API 3.0 + 自实现 TC3 签名（博客 3.1 旧方案） | **自签发 / 日志模式，不接任何短信网关** | 验证码模块的硬核价值在 SmsService（生成/Redis/Lua 原子校验/限流/锁定），"码怎么送达"对自驱动/演示项目是次要的；接网关带来凭据、计费、网络往返负担。2026-09-02 回退：SmsSender 退化为仅写日志（前缀 SMS_CODE），移除 libcurl 与 TC3 签名，项目零凭据可跑 |
 
 净效果：登录模块引入的新依赖只有 `libhiredis-dev` 与 `redis-server`，其余全部复用既有组件。
 
 ### ADR-2 两个"必须挪出 IO 线程"的阻塞点
 
-> 决策日：2026-09-02 ｜ 随 #5/#6 实现落地：`20d06de`（PBKDF2 挪线程）、`6a3ab55`（短信 HTTP 挪线程）
+> 决策日：2026-09-02 ｜ 随 #5/#6 实现落地：`20d06de`（PBKDF2 挪线程）；短信 HTTP 原也是阻塞点（`6a3ab55`），已于 2026-09-02 回退为自签发/日志模式，该阻塞点随之消失
 
-Drogon 的 IO 线程上只允许非阻塞操作，下面两处都是同步阻塞的，一律丢进独立工作线程、算完用 `queueInLoop` 切回：
+Drogon 的 IO 线程上只允许非阻塞操作，下面这处是同步阻塞的，须丢进独立工作线程、算完用 `queueInLoop` 切回：
 
 | 阻塞点 | 耗时量级 | 若留在 IO 线程的后果 |
 | --- | --- | --- |
 | PBKDF2 密码哈希（`service/password.cc`） | 12 万次迭代 ≈ 30~60ms CPU | 登录接口的慢会**传染**给同线程上排队的秒杀请求 |
-| 短信 HTTP 请求（`service/SmsSender.cc`，libcurl） | 网络往返 ≈ 几十 ms | 下游短信网关一慢，业务线程就被拖住 |
+
+> 注：短信发送原是第二处阻塞点（`service/SmsSender.cc` 的 libcurl 同步 HTTP，网络往返 ≈ 几十 ms），下游一慢就拖住业务线程。2026-09-02 已回退为**自签发 / 日志模式**（不发起任何网络请求），该阻塞点随之消失，发送不再需要挪到工作线程。验证码的硬核逻辑（生成 / Redis / Lua 原子校验 / 限流 / 锁定）全在 `SmsService`，与送达方式无关。
 
 ### ADR-3 4.8 应用层锁：锁到底该锁在哪
 
@@ -336,9 +337,7 @@ bash scripts/build-wsl.sh
 | 登录 / 短信接口全返 `503 ... (redis not connected)` | `getRedisClient("default")` 拿到空指针——要么 `config.json` 没配 `redis_clients`，要么 Drogon 编译时没探测到 hiredis | ① `config.json` 加 `redis_clients` 段；② `sudo apt install libhiredis-dev` 后**重新编译安装 Drogon**（`-DBUILD_REDIS=ON`）；③ `sudo service redis-server start` |
 | `redis-cli ping` 报 `Could not connect` | WSL 不自启服务 | `sudo service redis-server start`，或 `sudo redis-server --daemonize yes` |
 | 调用 Redis 接口报 `SESS_*_FAILED` / `SMS_LUA_FAILED` | Redis 连不上或 Lua 脚本报错 | 看 `logs/seckill.log` 里的具体异常；先 `redis-cli ping` 确认服务在 |
-| 短信接口返回成功但手机没收到，日志只有 `SMS_MOCK` | `sms.enabled=false` 或凭据为空 → 降级为"只打日志" | 填全 `secret_id` / `secret_key` / `sdk_app_id` / `sign_name` / `template_id` 并把 `enabled` 置 `true`；验证码从 `SMS_MOCK phone=... code=...` 这条日志里读 |
-| 腾讯云返回 `AuthFailure.SignatureExpire` | 本机系统时间不准（TC3 签名带时间戳，偏差过大会被拒） | `sudo apt install ntpdate && sudo ntpdate -u pool.ntp.org` |
-| 腾讯云返回 `InvalidParameterValue.IncorrectPhoneNumber` | 手机号没带国际区号 | 代码已自动补 `+86`，若改过 `SmsSender.cc` 请确认 `PhoneNumberSet` 元素形如 `+8613800001111` |
+| 短信接口返回成功但手机没收到 | 验证码走自签发 / 日志模式，不接短信网关 | 验证码从日志里 `SMS_CODE phone=... code=...` 这条读取后填入校验接口 |
 
 ### 6.4 快速查看数据
 
@@ -405,7 +404,7 @@ curl -s -X POST localhost:8080/api/seckill \
 curl -s -X POST localhost:8080/api/sms/send \
   -H 'Content-Type: application/json' -d '{"phone":"13800001111"}'
 
-# 2) 注册（code 从日志里捞：grep SMS_MOCK logs/seckill.log）
+# 2) 注册（code 从日志里捞：grep SMS_CODE logs/seckill.log）
 curl -s -X POST localhost:8080/api/user/register \
   -H 'Content-Type: application/json' \
   -d '{"phone":"13800001111","password":"abc123","code":"123456"}'
@@ -446,9 +445,7 @@ bash scripts/verify-auth.sh 13800001111 abc123
 | 段 | 键 | 默认 | 说明 |
 | --- | --- | --- | --- |
 | `jwt` | `secret` / `issuer` / `ttl_seconds` | — / `seckill-cpp` / `7200` | JWT 密钥（**生产必须换**）、签发者、有效期 |
-| `sms` | `enabled` | `false` | `true` 且凭据非空才真发短信；否则降级为只打日志 |
-| `sms` | `secret_id` / `secret_key` / `sdk_app_id` / `sign_name` / `template_id` | 空 | 腾讯云短信凭据（留空即 mock 模式） |
-| `sms` | `code_ttl_seconds` / `resend_interval_seconds` / `daily_limit` / `max_verify_attempts` | `300` / `60` / `10` / `5` | 验证码有效期、重发冷却、每日上限、单个码试错上限 |
+| `sms` | `code_ttl_seconds` / `resend_interval_seconds` / `daily_limit` / `max_verify_attempts` | `300` / `60` / `10` / `5` | 验证码有效期、重发冷却、每日上限、单个码试错上限（送达为自签发/日志模式，不接短信网关，无需任何腾讯云凭据） |
 | `login_guard` | `max_fail` / `lock_seconds` | `5` / `600` | 密码错误阈值与锁定时长 |
 | `auth` | `require_sms_on_register` / `require_sms_on_login` / `min_password_length` | `true` / `false` / `6` | 是否强制验证码、密码最小长度 |
 | `seckill_lock` | `mode` / `shards` / `bits` | `none` / `64` / `65536` | 4.8 闸门：`none`/`mutex`/`spin`/`atomic` |

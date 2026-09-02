@@ -7,7 +7,7 @@ echo "==> 更新 apt 并安装基础工具链"
 sudo apt-get update
 sudo apt-get install -y git g++ cmake ninja-build \
     libjsoncpp-dev libboost-all-dev libssl-dev libc-ares-dev \
-    libcurl4-openssl-dev uuid-dev zlib1g-dev \
+    uuid-dev zlib1g-dev \
     libmariadb-dev libmariadb-dev-compat \
     libspdlog-dev \
     libhiredis-dev redis-server

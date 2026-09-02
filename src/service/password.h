@@ -1,7 +1,7 @@
 // 密码哈希：PBKDF2-HMAC-SHA256（OpenSSL）
 //
 // 为什么是 PBKDF2 而不是引 bcrypt-cpp：
-//   - 依赖更少：OpenSSL 是 Drogon / hiredis / libcurl 的底层依赖，几乎必然在场；
+//   - 依赖更少：OpenSSL 是 Drogon / hiredis 的底层依赖，几乎必然在场；
 //     引 bcrypt-cpp 是多一项依赖 + 一段编译面。
 //   - 可调迭代次数：硬件变快就把 iterations 上调，没有"库停更就裸奔"的风险。
 //   - 算法公开可审计，代码就这几行，出问题能自己定位。

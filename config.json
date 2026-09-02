@@ -23,19 +23,10 @@
       "ttl_seconds": 7200
     },
     "sms": {
-      "enabled": false,
-      "secret_id": "",
-      "secret_key": "",
-      "region": "ap-guangzhou",
-      "sdk_app_id": "",
-      "sign_name": "",
-      "template_id": "",
       "code_ttl_seconds": 300,
       "resend_interval_seconds": 60,
       "daily_limit": 10,
-      "max_verify_attempts": 5,
-      "timeout_seconds": 5,
-      "connect_timeout_seconds": 3
+      "max_verify_attempts": 5
     },
     "login_guard": {
       "max_fail": 5,

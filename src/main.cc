@@ -1,4 +1,3 @@
-#include <curl/curl.h>
 #include <drogon/drogon.h>
 #include <json/json.h>
 #include <spdlog/spdlog.h>
@@ -117,26 +116,8 @@ AppBundle buildBundle() {
                                               cfgInt(guardCfg, "lock_seconds", 600));
 
     const Json::Value &smsCfg = cc["sms"];
-    SmsSender::Config senderCfg;
-    const std::string secretId = cfgStr(smsCfg, "secret_id", "");
-    const std::string secretKey = cfgStr(smsCfg, "secret_key", "");
-    // 凭据填全了才允许真发短信。否则降级为"只打日志"——
-    // 这样本地开发/压测能跑通整条链路，也不至于误发短信产生费用。
-    senderCfg.enabled = cfgBool(smsCfg, "enabled", false) &&
-                        !secretId.empty() && !secretKey.empty();
-    senderCfg.secretId = secretId;
-    senderCfg.secretKey = secretKey;
-    senderCfg.region = cfgStr(smsCfg, "region", "ap-guangzhou");
-    senderCfg.sdkAppId = cfgStr(smsCfg, "sdk_app_id", "");
-    senderCfg.signName = cfgStr(smsCfg, "sign_name", "");
-    senderCfg.templateId = cfgStr(smsCfg, "template_id", "");
-    senderCfg.timeoutSeconds = cfgInt(smsCfg, "timeout_seconds", 5);
-    senderCfg.connectTimeoutSeconds = cfgInt(smsCfg, "connect_timeout_seconds", 3);
-    if (cfgBool(smsCfg, "enabled", false) && !senderCfg.enabled) {
-        LOG_WARN << "sms.enabled=true but credentials empty -> falling back to mock "
-                    "(code only logged, nothing actually sent)";
-    }
-    auto sender = std::make_shared<SmsSender>(senderCfg);
+    // 验证码送达：自签发 / 日志可读模式，不接任何短信网关（详见 SmsSender.h）。
+    auto sender = std::make_shared<SmsSender>();
 
     SmsService::Config smsSvcCfg;
     smsSvcCfg.codeTtlSeconds = cfgInt(smsCfg, "code_ttl_seconds", 300);
@@ -178,9 +159,6 @@ drogon::HttpResponsePtr unavailable(const char *what) {
 }  // namespace
 
 int main() {
-    // libcurl 的全局初始化必须在任何线程创建之前、且只做一次（非线程安全）。
-    curl_global_init(CURL_GLOBAL_DEFAULT);
-
     // 读取 config.json：其中声明了监听端口、线程数、MySQL 与 Redis 客户端。
     drogon::app().loadConfigFile("./config.json");
 
@@ -309,6 +287,5 @@ int main() {
     LOG_INFO << "seckill-cpp starting on :8080 (stage-1: DB-direct + auth module)";
     drogon::app().run();
 
-    curl_global_cleanup();
     return 0;
 }

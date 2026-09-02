@@ -17,9 +17,8 @@ find_package(Drogon REQUIRED)
 # 异步日志依赖（self 实现的环形缓冲只负责排队，落盘 sink 复用 spdlog）。
 find_package(spdlog REQUIRED)
 
-# 登录模块依赖：OpenSSL 负责 PBKDF2 哈希 / JWT 的 HMAC-SHA256 / 腾讯云 TC3 签名，
-# libcurl 负责短信 HTTP 请求。两者都是 Drogon 的既有底层依赖，不额外增加部署负担。
+# 登录模块依赖：OpenSSL 负责 PBKDF2 哈希 / JWT 的 HMAC-SHA256。
+# 验证码送达已改为自签发 / 日志模式，不再依赖 libcurl / 短信网关。
 find_package(OpenSSL REQUIRED)
-find_package(CURL REQUIRED)
 
 add_subdirectory(src)

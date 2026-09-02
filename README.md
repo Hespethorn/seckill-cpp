@@ -9,7 +9,7 @@
 
 - **阶段一已落地**（`v0.1.x`）：Drogon + MySQL 直连，原子 `UPDATE ... WHERE stock>0` 防超卖，事务化幂等下单（`uk_user_sku` 唯一键兜底）。
 - **自实现登录鉴权**：PBKDF2 加盐哈希、自写 JWT（HS256）、Drogon 内置 Redis 异步客户端可吊销会话——零引入 `redis-plus-plus` / `jwt-cpp` 等同步或需 FetchContent 的依赖。
-- **短信验证码直连腾讯云 API 3.0**（自实现 TC3-HMAC-SHA256 签名），含 Lua 原子校验、发送限流、登录失败锁定。
+- **短信验证码（自签发 / 日志模式）**：6 位码 CSPRNG 生成 + Redis 存储 + Lua 原子校验、发送限流、登录失败锁定，不接任何短信网关。
 - **应用层在途闸门**（`service/InflightGuard.h`，mutex / 自旋 / 原子三后端）挡掉并发窗口内的重复下单，DB 压力降约 75%。
 - **实测基线**：官方 JMeter 压测 **QPS≈371 / p95≈359ms / 0 超卖**，curl harness 交叉验证 ≈341。
 
@@ -56,7 +56,7 @@ bash scripts/build-wsl.sh
 
 ```
 seckill-cpp/
-├── CMakeLists.txt            # find_package(Drogon / spdlog / OpenSSL / CURL)
+├── CMakeLists.txt            # find_package(Drogon / spdlog / OpenSSL)
 ├── config.json               # 监听端口 + MySQL + Redis + jwt/sms/lock 配置
 ├── src/
 │   ├── main.cc               # Drogon 启动 + 路由装配（getDbClient/RedisClient 延迟到 handler）
@@ -72,7 +72,7 @@ seckill-cpp/
 │   │   ├── Jwt.*                 # 自实现 HS256 签发/校验
 │   │   ├── SessionStore.*        # Redis 可吊销会话 sess:{jti}
 │   │   ├── LoginGuard.*          # 3.6 错误次数 + 账号锁定（Lua 原子）
-│   │   ├── SmsSender.*           # 腾讯云 API + 自实现 TC3-HMAC-SHA256 签名
+│   │   ├── SmsSender.*           # 验证码送达：自签发 / 日志模式（不接短信网关）
 │   │   ├── SmsService.*          # 验证码生成/限流/原子校验
 │   │   └── UserService.*         # 注册 / 登录 / 登出 / 鉴权
 │   └── logging/              # 异步日志（环形缓冲 + spdlog sink + SK_LOG_* 宏）

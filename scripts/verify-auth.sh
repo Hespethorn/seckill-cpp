@@ -60,16 +60,15 @@ echo "==> 1) 请求验证码"
 send_resp=$(post /api/sms/send "{\"phone\":\"$PHONE\"}")
 check "发送验证码返回成功" '"code":0' "$send_resp"
 
-# 取验证码：真发模式（配了腾讯云凭据）下拿不到，需要手工输入；
-# mock 模式下验证码只写进日志，从日志里捞。
+# 取验证码：自签发 / 日志模式，验证码只写进日志，从日志里捞。
 CODE=""
 if [[ -f "$LOG_FILE" ]]; then
     sleep 0.5  # 异步日志落盘有一点点延迟
-    CODE=$(grep -o "SMS_MOCK phone=$PHONE code=[0-9]\{6\}" "$LOG_FILE" 2>/dev/null |
+    CODE=$(grep -o "SMS_CODE phone=$PHONE code=[0-9]\{6\}" "$LOG_FILE" 2>/dev/null |
            tail -1 | grep -o 'code=[0-9]\{6\}' | cut -d= -f2)
 fi
 if [[ -z "$CODE" ]]; then
-    echo "  未从日志拿到验证码（sms.enabled=true 真发模式，或日志路径不对）"
+    echo "  未从日志拿到验证码（日志路径不对，或尚未发送）"
     printf '  请手动输入收到的验证码: '
     read -r CODE
 fi
@@ -90,7 +89,7 @@ echo "==> 4) 重复注册同一手机号"
 redis-cli DEL "sms:cd:$PHONE" >/dev/null 2>&1  # 跳过 60s 重发冷却，只为测查重
 post /api/sms/send "{\"phone\":\"$PHONE\"}" >/dev/null
 sleep 0.5
-CODE2=$(grep -o "SMS_MOCK phone=$PHONE code=[0-9]\{6\}" "$LOG_FILE" 2>/dev/null |
+CODE2=$(grep -o "SMS_CODE phone=$PHONE code=[0-9]\{6\}" "$LOG_FILE" 2>/dev/null |
         tail -1 | grep -o 'code=[0-9]\{6\}' | cut -d= -f2)
 resp=$(post /api/user/register "{\"phone\":\"$PHONE\",\"password\":\"$PWD\",\"code\":\"$CODE2\"}")
 check "重复注册被拒" 'PHONE_REGISTERED' "$resp"
