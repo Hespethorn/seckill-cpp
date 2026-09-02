@@ -2,6 +2,9 @@
 #include <json/json.h>
 #include <string>
 #include "logging/LogStream.h"
+#include "util/HttpJson.h"
+
+using namespace seckill::http;  // reply / replyData 统一 JSON 响应构造
 
 void SeckillController::seckill(
     const drogon::HttpRequestPtr &req,
@@ -16,12 +19,8 @@ void SeckillController::seckill(
         SK_LOG_WARN << "BAD_REQUEST missing/invalid userId/skuId"
                     << " path=" << req->getPath()
                     << " remote=" << req->getPeerAddr().toIpPort();
-        Json::Value err;
-        err["code"] = 400;
-        err["msg"] = "missing or invalid userId/skuId";
-        auto resp = drogon::HttpResponse::newHttpJsonResponse(err);
-        resp->setStatusCode(drogon::k400BadRequest);
-        callback(resp);
+        reply(std::move(callback), 400, "missing or invalid userId/skuId",
+              drogon::k400BadRequest);
         return;
     }
 
@@ -33,21 +32,15 @@ void SeckillController::seckill(
     //    不要在此处持有 req 的引用做同步阻塞。
     svc_->doSeckill(userId, skuId,
         [callback](bool ok, const std::string &msg) mutable {
-            Json::Value root;
-            root["code"] = ok ? 0 : 1;
-            root["msg"] = ok ? "success" : msg;
-
-            auto resp = drogon::HttpResponse::newHttpJsonResponse(root);
-            if (!ok) {
-                // 用不同的 HTTP 状态码区分「业务拒绝」和「系统错误」：
-                // 业务拒绝（售罄 / 重复下单）客户端不该重试；系统错误才值得重试。
-                if (msg == "SOLD_OUT" || msg == "DUPLICATE_ORDER") {
-                    resp->setStatusCode(drogon::k409Conflict);
-                } else {
-                    resp->setStatusCode(drogon::k500InternalServerError);
-                }
+            // 用不同的 HTTP 状态码区分「业务拒绝」和「系统错误」：
+            // 业务拒绝（售罄 / 重复下单）客户端不该重试；系统错误才值得重试。
+            if (ok) {
+                reply(std::move(callback), 0, "success");
+            } else if (msg == "SOLD_OUT" || msg == "DUPLICATE_ORDER") {
+                reply(std::move(callback), 1, msg, drogon::k409Conflict);
+            } else {
+                reply(std::move(callback), 1, msg, drogon::k500InternalServerError);
             }
-            callback(resp);
         });
 }
 
@@ -56,19 +49,12 @@ void SeckillController::listSkus(
     std::function<void(const drogon::HttpResponsePtr &)> &&callback) {
     svc_->listSkus(
         [callback](bool ok, const Json::Value &data) mutable {
-            Json::Value root;
-            int httpStatus = drogon::k200Ok;
             if (ok) {
-                root["code"] = 0;
-                root["data"] = data;  // Json 数组
+                replyData(std::move(callback), 0, data);
             } else {
-                root["code"] = 1;
-                root["msg"] = "query failed";
-                httpStatus = drogon::k500InternalServerError;
+                reply(std::move(callback), 1, "query failed",
+                      drogon::k500InternalServerError);
             }
-            auto resp = drogon::HttpResponse::newHttpJsonResponse(root);
-            resp->setStatusCode(httpStatus);
-            callback(resp);
         });
 }
 
@@ -84,29 +70,16 @@ void SeckillController::detailSku(
         skuId = -1;
     }
     if (skuId <= 0) {
-        Json::Value err;
-        err["code"] = 400;
-        err["msg"] = "invalid skuId";
-        auto resp = drogon::HttpResponse::newHttpJsonResponse(err);
-        resp->setStatusCode(drogon::k400BadRequest);
-        callback(resp);
+        reply(std::move(callback), 400, "invalid skuId", drogon::k400BadRequest);
         return;
     }
 
     svc_->detailSku(skuId,
         [callback](bool ok, const Json::Value &data) mutable {
-            Json::Value root;
-            int httpStatus = drogon::k200Ok;
             if (ok) {
-                root["code"] = 0;
-                root["data"] = data;  // Json 对象
+                replyData(std::move(callback), 0, data);
             } else {
-                root["code"] = 1;
-                root["msg"] = "sku not found";
-                httpStatus = drogon::k404NotFound;
+                reply(std::move(callback), 1, "sku not found", drogon::k404NotFound);
             }
-            auto resp = drogon::HttpResponse::newHttpJsonResponse(root);
-            resp->setStatusCode(httpStatus);
-            callback(resp);
         });
 }
