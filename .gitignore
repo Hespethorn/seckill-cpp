@@ -13,6 +13,12 @@ compile_commands.json
 # 本地配置覆盖（含密码，勿提交）
 config.local.json
 
+# JMeter 压测产物（保留 jmeter/*.jmx 与 scripts/jmeter-baseline.sh）
+jmeter/report/
+jmeter/results.csv
+jmeter/aggregate.csv
+jmeter/jmeter.log
+
 # 编辑器/工具
 .*/
 *.swp
