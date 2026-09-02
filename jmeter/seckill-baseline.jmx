@@ -36,7 +36,7 @@
               </elementProp>
             </collectionProp>
           </elementProp>
-          <stringProp name="HTTPsampler.domain">localhost</stringProp>
+          <stringProp name="HTTPsampler.domain">127.0.0.1</stringProp>
           <stringProp name="HTTPsampler.port">8080</stringProp>
           <stringProp name="HTTPsampler.protocol">http</stringProp>
           <stringProp name="HTTPsampler.contentEncoding"></stringProp>

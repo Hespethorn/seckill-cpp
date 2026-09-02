@@ -24,7 +24,7 @@ if ! mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill -e "SELECT 1;" >/dev/n
 fi
 
 # 2) 服务必须就绪
-if ! curl -sf -X GET localhost:8080/api/health >/dev/null 2>&1; then
+if ! curl -sf -X GET 127.0.0.1:8080/api/health >/dev/null 2>&1; then
   echo "[!] seckill-cpp 未运行，请先: ./build/src/seckill-cpp"
   exit 1
 fi
@@ -43,7 +43,7 @@ run_curl_harness() {
   START=$(date +%s.%N)
   seq 1 1000000 | timeout "$DURATION" xargs -P "$CONCURRENCY" -I{} \
     curl -s -o /dev/null -w "%{http_code} %{time_total}\n" \
-      -X POST localhost:8080/api/seckill \
+      -X POST 127.0.0.1:8080/api/seckill \
       -H 'Content-Type: application/json' \
       -d '{"userId":{},"skuId":1}' > "$RAW" 2>/dev/null || true
   END=$(date +%s.%N)
@@ -75,7 +75,7 @@ if [ "$MODE" = "correct" ]; then
     -e "DELETE FROM seckill_order; UPDATE seckill_sku SET stock=10, total=10 WHERE id=1;"
   : > /tmp/seckill-correct.out
   for i in $(seq 1 100); do
-    curl -s -o /dev/null -w "%{http_code}\n" -X POST localhost:8080/api/seckill \
+    curl -s -o /dev/null -w "%{http_code}\n" -X POST 127.0.0.1:8080/api/seckill \
       -H 'Content-Type: application/json' -d "{\"userId\":$i,\"skuId\":1}" &
   done > /tmp/seckill-correct.out
   wait
