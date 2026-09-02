@@ -88,7 +88,7 @@ if [ "$MODE" = "correct" ]; then
 fi
 
 # ---------- 基线模式 ----------
-if [ -n "${JMETER_BIN:-}" ] && [ -x "$JMETER_BIN" ]; then
+if [ -n "${JMETER_BIN:-}" ] && [ -x "$JMETER_BIN" ] && [ -f jmeter/seckill-baseline.jmx ]; then
   echo "[*] 使用官方 JMeter: $JMETER_BIN"
   # 关键修复：禁用 Java/JMeter 代理。本机若设了 http_proxy（如 127.0.0.1:9305），
   # Java 会把它当 http.proxyHost，把请求路由到代理而非 127.0.0.1:8080 → 100% connection refused。
@@ -101,8 +101,9 @@ if [ -n "${JMETER_BIN:-}" ] && [ -x "$JMETER_BIN" ]; then
   rm -rf jmeter/report jmeter/results.csv jmeter/aggregate.csv
   # 注意：JMeter 5.6.3 的 jmeter.httpclient 合法值只有 3(HC3,废弃)/4(HC4,默认)，
   # 没有"Java 原生实现=2"（那是 3.x/4.x 的历史值，5.x 已移除）。故无法用 flag 绕开 HC4。
-  # HTTPHC4Impl 类初始化失败（ExceptionInInitializerError）在 WSL 上多为：
-  #   (a) JDK 过新（21，5.6.3 仅认证 8/11/17）；(b) JMeter 包损坏。两者都需改环境而非脚本。
+  # HTTPHC4Impl 类初始化失败（ExceptionInInitializerError）在 WSL 上多为 JMeter 包损坏
+  # （jar 截断导致静态初始化 NoClassDefFoundError）。本机实测 JDK 11.0.32 属认证范围，
+  # 非 JDK 问题；重下官方包并 sha512 校验即可。
   if "$JMETER_BIN" -n -t jmeter/seckill-baseline.jmx \
         -l jmeter/results.csv -e -o jmeter/report -j jmeter/jmeter.log; then
     # JMeter 可能退出 0 但产出 0 样本（HTTPHC4Impl 类初始化失败会静默 0 样本）
@@ -121,8 +122,13 @@ if [ -n "${JMETER_BIN:-}" ] && [ -x "$JMETER_BIN" ]; then
     run_curl_harness
   fi
 else
-  echo "[*] 未设置 JMETER_BIN（或不可执行），使用零依赖 curl harness"
-  echo "[*] 若要用官方 JMeter（出 HTML 报告）：export JMETER_BIN=/path/to/apache-jmeter/bin/jmeter"
+  if [ -n "${JMETER_BIN:-}" ] && [ -x "$JMETER_BIN" ]; then
+    echo "[!] jmeter/seckill-baseline.jmx 缺失，回退 curl harness"
+    echo "[!] 若被误删可恢复：git checkout HEAD -- jmeter/seckill-baseline.jmx"
+  else
+    echo "[*] 未设置 JMETER_BIN（或不可执行），使用零依赖 curl harness"
+    echo "[*] 若要用官方 JMeter（出 HTML 报告）：export JMETER_BIN=/path/to/apache-jmeter/bin/jmeter"
+  fi
   run_curl_harness
 fi
 

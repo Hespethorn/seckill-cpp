@@ -19,6 +19,9 @@ jmeter/results.csv
 jmeter/aggregate.csv
 jmeter/jmeter.log
 jmeter.log
+# JMeter 安装包（勿提交，体积大且含二进制）
+apache-jmeter-*.tgz
+apache-jmeter-*.tgz.sha512
 
 # 编辑器/工具
 .*/
