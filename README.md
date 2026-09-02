@@ -49,8 +49,8 @@
 - [x] 3.5 验证码安全加固：Redis Lua 原子校验 + 每日发送上限 + 试错上限 — `seckcpp0305`
 - [x] 3.6 登录安全加固：密码错误次数限制 + 账号临时锁定 — `seckcpp0306`
 - [x] 3.7 退出登录接口（删 Redis 会话即吊销）— `seckcpp0307`
-- [ ] 3.8 代码细节重构 — `seckcpp0308`
-- [ ] 3.9 滑块验证码（自实现或接入行为验证）— `seckcpp0309`
+- [x] 3.8 代码细节重构 — `seckcpp0308`（抽出 `seckill::http` 统一 JSON 响应 helper，SeckillController 三处 handler 复用）
+- [ ] 3.9 滑块验证码（自实现或接入行为验证）— `seckcpp0309` — **挪到「开始有前端」阶段再做；本阶段博客 3.9 只写设计 + 注明，不落地代码**（前端引成熟框架 vue3-slide-verify / AJ-Captcha，后端校验仍自写）
 
 > 注：登录模块在阶段一里就把 **Redis 提前到 `v0.1.x` 进场**（原架构演进中 Redis 属阶段二）。
 
@@ -79,14 +79,14 @@ Drogon 的 IO 线程上只允许非阻塞操作，下面两处都是同步阻塞
 
 - [x] 4.3 秒杀下单接口（原子 `UPDATE ... WHERE stock>0` + 事务化幂等下单，代码已完成）— `seckcpp0403`
 - [x] 4.6 解决超卖：SQL 条件判断（行锁内 `WHERE stock>0`）— `seckcpp0406`
-- [ ] 4.1 秒杀商品列表接口 — `seckcpp0401`
-- [ ] 4.2 秒杀商品详情接口 — `seckcpp0402`
+- [x] 4.1 秒杀商品列表接口 — `seckcpp0401`（GET `/api/seckill/list`）
+- [x] 4.2 秒杀商品详情接口 — `seckcpp0402`（GET `/api/seckill/{skuId}`）
 - [x] 4.4 压测：100 用户抢 10 件，核对不超卖（correct 模式：10×200 / 90×409，sold=orders=10）— `seckcpp0404`
 - [x] 4.5 压测：暴露/验证重复下单（uk_user_sku + ON DUPLICATE 幂等，0 重复）— `seckcpp0405`
 - [x] 4.7 基线性能测试（官方 JMeter：QPS≈371 / p95≈359ms / 0 超卖；curl harness 交叉验证 ≈341）+ 阶段一总结（博客待产出）— `seckcpp0407`
 - [x] 4.8 应用层在途闸门：mutex / 自旋 / 原子三后端（`service/InflightGuard.h`），`scripts/lock-bench.sh` 对比压测 — `seckcpp0408`
 
-> 当前 `/api/seckill` 已实现 4.3 / 4.6 / 4.8 核心逻辑（原子扣减 + 幂等 + 应用层闸门），但博客文章 4.3 / 4.6 / 4.4 / 4.5 / 4.7 / 4.8 尚未写；代码侧超卖 / 重复下单已解决并实测验证（correct 模式 0 超卖、baseline QPS≈371），文章按"项目先行、博客随后"约定待产出。
+> 当前 `/api/seckill` 已实现 4.1（列表）/ 4.2（详情）/ 4.3 / 4.6 / 4.8 核心逻辑（查询 + 原子扣减 + 幂等 + 应用层闸门），但博客文章 4.1 / 4.2 / 4.3 / 4.6 / 4.4 / 4.5 / 4.7 / 4.8 尚未写；代码侧超卖 / 重复下单已解决并实测验证（correct 模式 0 超卖、baseline QPS≈371），文章按"项目先行、博客随后"约定待产出。
 
 #### 4.8 应用层锁：锁到底该锁在哪
 
