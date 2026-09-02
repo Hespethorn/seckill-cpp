@@ -217,7 +217,7 @@ Drogon 的 IO 线程上只允许非阻塞操作，下面两处都是同步阻塞
 | --- | --- |
 | 验证码前端拿不到 | `SmsSender` 未配腾讯云凭据时 `enabled=false`，只在日志里打码 → 需加 dev 开关把 code 回显到响应 |
 | 压测被页面干扰 | 静态文件与 API 共用 IO 线程，压测期间不要开着页面自动刷新 |
-| 改鉴权动到基线 | 下单接口当前 `userId` 走 JSON body，改 Bearer 会动到已压测的代码 → 放在 4.8 之后，或保留 body 传参双通道 |
+| 改鉴权动到基线 | 下单接口当前 `userId` 走 JSON body、**不校验 token**（登录模块 3.1~3.7 已就绪但未接入主链路）→ **已决定保留 body 双通道**，登录鉴权接入（从 Bearer 取 userId）留待「开始有前端」阶段统一做；这是阶段一为压测便利的有意取舍 |
 
 ## 当前版本（v0.1.x）做了什么
 
@@ -226,7 +226,7 @@ Drogon 的 IO 线程上只允许非阻塞操作，下面两处都是同步阻塞
 | 方法 | 路径 | 说明 | 依赖 |
 | --- | --- | --- | --- |
 | GET | `/api/health` | 健康检查 | — |
-| POST | `/api/seckill` | 秒杀下单 | MySQL |
+| POST | `/api/seckill` | 秒杀下单（**不校验 token**，`userId` 走 body；鉴权接入留待前端阶段） | MySQL |
 | GET | `/api/lock/stats` | 4.8 在途闸门统计（mode / acquired / rejected） | — |
 | POST | `/api/sms/send` | 发送短信验证码 | **Redis** |
 | POST | `/api/user/register` | 注册（默认需验证码） | MySQL + Redis |
