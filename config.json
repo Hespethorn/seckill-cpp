@@ -16,6 +16,40 @@
     "async_log": {
       "file": "./logs/seckill.log",
       "level": "warn"
+    },
+    "jwt": {
+      "secret": "CHANGE_ME_please_use_a_long_random_string_in_production",
+      "issuer": "seckill-cpp",
+      "ttl_seconds": 7200
+    },
+    "sms": {
+      "enabled": false,
+      "secret_id": "",
+      "secret_key": "",
+      "region": "ap-guangzhou",
+      "sdk_app_id": "",
+      "sign_name": "",
+      "template_id": "",
+      "code_ttl_seconds": 300,
+      "resend_interval_seconds": 60,
+      "daily_limit": 10,
+      "max_verify_attempts": 5,
+      "timeout_seconds": 5,
+      "connect_timeout_seconds": 3
+    },
+    "login_guard": {
+      "max_fail": 5,
+      "lock_seconds": 600
+    },
+    "auth": {
+      "require_sms_on_register": true,
+      "require_sms_on_login": false,
+      "min_password_length": 6
+    },
+    "seckill_lock": {
+      "mode": "none",
+      "shards": 64,
+      "bits": 65536
     }
   },
   "db_clients": [
@@ -28,6 +62,16 @@
       "user": "seckill",
       "passwd": "seckill",
       "connection_number": 10
+    }
+  ],
+  "redis_clients": [
+    {
+      "name": "default",
+      "host": "127.0.0.1",
+      "port": 6379,
+      "passwd": "",
+      "connection_number": 4,
+      "timeout": -1
     }
   ]
 }
