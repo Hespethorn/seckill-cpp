@@ -32,9 +32,9 @@ mkdir -p jmeter
 
 if [ "$MODE" = "correct" ]; then
   # 正确性突发：库存置 10，100 个唯一用户并发抢，期望 10 成功 / 90 SOLD_OUT / 0 超卖
-  echo "[*] 正确性模式：库存置 10，100 抢 10"
+  echo "[*] 正确性模式：清空订单表 + 库存置 10，100 抢 10"
   mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill \
-    -e "UPDATE seckill_sku SET stock=10, total=10 WHERE id=1;"
+    -e "DELETE FROM seckill_order; UPDATE seckill_sku SET stock=10, total=10 WHERE id=1;"
   # 用 curl 并发模拟（简单可复现，不依赖 JMeter GUI）
   : > /tmp/seckill-correct.out
   for i in $(seq 1 100); do
@@ -56,10 +56,13 @@ mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill \
   -e "UPDATE seckill_sku SET stock=10000, total=10000 WHERE id=1;"
 
 rm -rf jmeter/report jmeter/results.csv jmeter/aggregate.csv
+# 注意：本机 apt 装的 jmeter 包装脚本不支持 `-e -o`（会报 Unknown option -e），
+# 所以先只出 CSV（-l），再用 `-g` 从 CSV 生成 HTML 报告（best-effort，失败不阻断）。
 jmeter -n -t jmeter/seckill-baseline.jmx \
   -l jmeter/results.csv \
-  -e -o jmeter/report \
-  -j jmeter/jmeter.log
+  -j jmeter/jmeter.log || true
+jmeter -g jmeter/results.csv -o jmeter/report 2>/dev/null \
+  || echo "[!] HTML 报告生成失败（不影响 CSV 结果），可忽略"
 
 echo "[*] 聚合报告 (jmeter/aggregate.csv):"
 [ -f jmeter/aggregate.csv ] && cat jmeter/aggregate.csv
