@@ -1,15 +1,42 @@
 #include "SeckillService.h"
-#include <drogon/orm/Result.h>
+
 #include <drogon/orm/Exception.h>
+#include <drogon/orm/Result.h>
+
 #include "logging/LogStream.h"
 
-SeckillService::SeckillService(drogon::orm::DbClientPtr client)
-    : db_(std::move(client)) {}
+using namespace seckill;  // InflightGuard / InflightToken 都定义在 seckill 命名空间
+
+SeckillService::SeckillService(drogon::orm::DbClientPtr client,
+                               std::shared_ptr<InflightGuard> inflight)
+    : db_(std::move(client)), inflight_(std::move(inflight)) {}
 
 void SeckillService::doSeckill(
     int64_t userId,
     int64_t skuId,
     std::function<void(bool, const std::string &)> &&callback) {
+    // ── 4.8 应用层在途闸门 ───────────────────────────────────────────────
+    // 同一 (userId, skuId) 若已有请求正在处理（还没从 DB 回来），后续请求直接判重复，
+    // 不再去挤 MySQL 行锁。注意这道闸门**只挡并发窗口内的重复**，
+    // 串行发出的两次下单（第一次已完成、订单已落库）不会被它拦住——
+    // 那种情况由 seckill_order 的 uk_user_sku 唯一键兜底。
+    // 两层分工：应用层挡并发重复（省 DB 往返），数据库唯一键挡一切重复（保正确性）。
+    InflightToken token;
+    if (inflight_ && inflight_->mode() != InflightGuard::Mode::None) {
+        token = inflight_->tryAcquire(InflightGuard::makeKey(userId, skuId));
+        if (!token.valid()) {
+            // 与"数据库命中唯一键"返回同一个业务码：客户端语义一致（不该重试），
+            // 但日志里区分开，便于压测时统计应用层到底挡掉了多少。
+            SK_LOG_WARN << "INFLIGHT_REJECT userId=" << userId << " skuId=" << skuId;
+            callback(false, "DUPLICATE_ORDER");
+            return;
+        }
+    }
+    // 从这里开始，token 会被按值捕获进下面每一层 lambda。
+    // 这是必须的：如果只捕获进最外层，最外层 lambda 发起第一条 SQL 后就析构了，
+    // 标记会被提前清掉，闸门形同虚设。每一层都持有一份 shared_ptr，
+    // 最后一份析构时才真正释放。
+
     // 开一个 DB 事务。newTransactionAsync 回调拿到的是 shared_ptr<Transaction>（const 引用）。
     //
     // v1.9.10 事务语义（见 orm_lib/src/TransactionImpl.cc 析构）：
@@ -25,7 +52,7 @@ void SeckillService::doSeckill(
     //   - cb 在各层 lambda 里按值拷贝（std::function 可拷贝），确保每条路径恰好调用一次、
     //     且不会因为链式 std::move 变成 moved-from 空函数。
     db_->newTransactionAsync(
-        [userId, skuId, cb = std::move(callback)](
+        [userId, skuId, cb = std::move(callback), token](
             const std::shared_ptr<drogon::orm::Transaction> &tx) {
             if (!tx) {
                 // 文档说明：超时情况下回调会拿到空的 shared_ptr。
@@ -38,7 +65,7 @@ void SeckillService::doSeckill(
 
             // 提交结果回调：事务析构自动 commit 之后触发（仅成功才调）。
             tx->setCommitCallback(
-                [cb](bool committed) {
+                [cb, token](bool committed) {
                     if (committed)
                         cb(true, "OK");
                     else
@@ -50,7 +77,7 @@ void SeckillService::doSeckill(
             tx->execSqlAsync(
                 "UPDATE seckill_sku SET stock = stock - 1 "
                 "WHERE id = ? AND stock > 0",
-                [tx, userId, skuId, cb](const drogon::orm::Result &result) {
+                [tx, userId, skuId, cb, token](const drogon::orm::Result &result) {
                     if (result.affectedRows() == 0) {
                         tx->rollback();
                         // 售罄是业务预期内的结果（不是故障），用 warn 而非 error：
@@ -74,7 +101,7 @@ void SeckillService::doSeckill(
                         "INSERT INTO seckill_order (user_id, sku_id, status, "
                         "create_time) VALUES (?, ?, 1, NOW()) "
                         "ON DUPLICATE KEY UPDATE id = id",
-                        [tx, userId, skuId, cb](const drogon::orm::Result &r2) {
+                        [tx, userId, skuId, cb, token](const drogon::orm::Result &r2) {
                             // affectedRows 语义（MySQL）：
                             //   1 = 真的插入了一条新订单
                             //   0 = 命中唯一键、走的 UPDATE 但值没变 = 重复下单
@@ -98,7 +125,7 @@ void SeckillService::doSeckill(
                             // 触发自动 commit → setCommitCallback → cb(true, "OK")。
                             // 回滚路径已各自显式调 cb，commitCallback 不会重复触发。
                         },
-                        [tx, userId, skuId, cb](const std::exception_ptr &eptr) {
+                        [tx, userId, skuId, cb, token](const std::exception_ptr &eptr) {
                             tx->rollback();
                             try {
                                 std::rethrow_exception(eptr);
@@ -112,7 +139,7 @@ void SeckillService::doSeckill(
                         },
                         userId, skuId);
                 },
-                [userId, skuId, tx, cb](const std::exception_ptr &eptr) {
+                [userId, skuId, tx, cb, token](const std::exception_ptr &eptr) {
                     tx->rollback();
                     try {
                         std::rethrow_exception(eptr);
