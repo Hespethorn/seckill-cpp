@@ -13,13 +13,9 @@ compile_commands.json
 # 本地配置覆盖（含密码，勿提交）
 config.local.json
 
-# JMeter 压测产物（保留 jmeter/*.jmx 与 scripts/jmeter-baseline.sh）
-jmeter/report/
-jmeter/results.csv
-jmeter/aggregate.csv
-jmeter/jmeter.log
-jmeter.log
-# JMeter 安装包（勿提交，体积大且含二进制）
+# JMeter 压测副产物统一收口到 jmeter/out/（保留 jmeter/*.jmx 与 scripts/jmeter-baseline.sh 为源码）
+jmeter/out/
+# JMeter 安装包（勿提交，体积大且含二进制；置于仓库任意目录均忽略）
 apache-jmeter-*.tgz
 apache-jmeter-*.tgz.sha512
 

@@ -31,25 +31,25 @@
             <collectionProp name="Arguments.arguments">
               <elementProp name="" elementType="HTTPArgument">
                 <boolProp name="HTTPArgument.always_encode">false</boolProp>
-                <stringProp name="Argument.value">{&quot;userId&quot;:${__counter(TRUE,)},&quot;skuId&quot;:1}</stringProp>
+                <stringProp name="Argument.value">{&quot;userId&quot;:${__counter(FALSE,)},&quot;skuId&quot;:1}</stringProp>
                 <stringProp name="Argument.metadata">=</stringProp>
               </elementProp>
             </collectionProp>
           </elementProp>
-          <stringProp name="HTTPsampler.domain">127.0.0.1</stringProp>
-          <stringProp name="HTTPsampler.port">8080</stringProp>
-          <stringProp name="HTTPsampler.protocol">http</stringProp>
-          <stringProp name="HTTPsampler.contentEncoding"></stringProp>
-          <stringProp name="HTTPsampler.path">/api/seckill</stringProp>
-          <stringProp name="HTTPsampler.method">POST</stringProp>
+          <stringProp name="HTTPSampler.domain">localhost</stringProp>
           <stringProp name="HTTPSampler.implementation">Java</stringProp>
-          <boolProp name="HTTPsampler.follow_redirects">true</boolProp>
-          <boolProp name="HTTPsampler.auto_redirects">false</boolProp>
-          <boolProp name="HTTPsampler.use_keepalive">true</boolProp>
-          <boolProp name="HTTPsampler.postBodyRaw">true</boolProp>
-          <stringProp name="HTTPsampler.concurrentPool">6</stringProp>
-          <stringProp name="HTTPsampler.connect_timeout"></stringProp>
-          <stringProp name="HTTPsampler.response_timeout"></stringProp>
+          <stringProp name="HTTPSampler.port">8080</stringProp>
+          <stringProp name="HTTPSampler.protocol">http</stringProp>
+          <stringProp name="HTTPSampler.contentEncoding"></stringProp>
+          <stringProp name="HTTPSampler.path">/api/seckill</stringProp>
+          <stringProp name="HTTPSampler.method">POST</stringProp>
+          <boolProp name="HTTPSampler.follow_redirects">true</boolProp>
+          <boolProp name="HTTPSampler.auto_redirects">false</boolProp>
+          <boolProp name="HTTPSampler.use_keepalive">true</boolProp>
+          <boolProp name="HTTPSampler.postBodyRaw">true</boolProp>
+          <stringProp name="HTTPSampler.concurrentPool">6</stringProp>
+          <stringProp name="HTTPSampler.connect_timeout"></stringProp>
+          <stringProp name="HTTPSampler.response_timeout"></stringProp>
         </HTTPSamplerProxy>
         <hashTree>
           <HeaderManager guiclass="HeaderPanel" testclass="HeaderManager" testname="HTTP Header Manager" enabled="true">
@@ -105,7 +105,7 @@
               <connectTime>true</connectTime>
             </value>
           </objProp>
-          <stringProp name="filename">jmeter/aggregate.csv</stringProp>
+          <stringProp name="filename">jmeter/out/aggregate.csv</stringProp>
         </ResultCollector>
         <hashTree/>
       </hashTree>

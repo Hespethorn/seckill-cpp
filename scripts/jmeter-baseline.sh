@@ -8,10 +8,14 @@
 # 压测引擎优先级：
 #   1) 若设置了 JMETER_BIN 且指向【官方 Apache JMeter】二进制（推荐，可出 HTML 报告）：
 #        export JMETER_BIN=/opt/apache-jmeter-5.6.3/bin/jmeter
-#      走 `jmeter -n -t jmeter/seckill-baseline.jmx -l ... -e -o ...` 直接出 HTML 报告。
+#      走 `jmeter -n -t jmeter/seckill-baseline.jmx -l jmeter/out/results.csv -e -o jmeter/out/report` 直接出 HTML 报告。
 #   2) 否则回退到零依赖 curl 并发 harness（无需任何 JMeter）。
 # 注意：Ubuntu/Debian `apt install jmeter` 装的是老/缝合怪包（加载 .jmx 报
 #       xstream ForbiddenClassException，且不认 -e -o），不可用；请用官网二进制。
+#
+# 副产物统一收口到 jmeter/out/（results.csv / aggregate.csv / report/ / jmeter.log /
+# seckill-correct.out / apache-jmeter-*.tgz），源码 jmeter/seckill-baseline.jmx 与
+# scripts/jmeter-baseline.sh 保留在仓库；jmeter/out/ 已在 .gitignore 忽略，不进版本库。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -29,7 +33,7 @@ if ! curl -sf -X GET 127.0.0.1:8080/api/health >/dev/null 2>&1; then
   exit 1
 fi
 
-mkdir -p jmeter
+mkdir -p jmeter/out
 
 # ---------- 零依赖 curl 并发 harness（保底 / 无 JMeter 时）----------
 run_curl_harness() {
@@ -73,14 +77,14 @@ if [ "$MODE" = "correct" ]; then
   echo "[*] 正确性模式：清空订单表 + 库存置 10，100 抢 10"
   mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill \
     -e "DELETE FROM seckill_order; UPDATE seckill_sku SET stock=10, total=10 WHERE id=1;"
-  : > /tmp/seckill-correct.out
+  : > jmeter/out/seckill-correct.out
   for i in $(seq 1 100); do
     curl -s -o /dev/null -w "%{http_code}\n" -X POST 127.0.0.1:8080/api/seckill \
       -H 'Content-Type: application/json' -d "{\"userId\":$i,\"skuId\":1}" &
-  done > /tmp/seckill-correct.out
+  done > jmeter/out/seckill-correct.out
   wait
   echo "[*] 返回码分布:"
-  sort /tmp/seckill-correct.out | uniq -c
+  sort jmeter/out/seckill-correct.out | uniq -c
   echo "[*] 不超卖核对（应 sold=10, orders=10）:"
   mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill -e \
     "SELECT (SELECT total FROM seckill_sku WHERE id=1)-(SELECT stock FROM seckill_sku WHERE id=1) AS sold, (SELECT COUNT(*) FROM seckill_order WHERE sku_id=1) AS orders;"
@@ -98,24 +102,24 @@ if [ -n "${JMETER_BIN:-}" ] && [ -x "$JMETER_BIN" ] && [ -f jmeter/seckill-basel
   # 给足库存（1e8，确保 60s 内不售罄，专测"卖出"事务路径）并清空历史订单
   mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill \
     -e "DELETE FROM seckill_order; UPDATE seckill_sku SET stock=100000000, total=100000000 WHERE id=1;"
-  rm -rf jmeter/report jmeter/results.csv jmeter/aggregate.csv
+  rm -rf jmeter/out/report jmeter/out/results.csv jmeter/out/aggregate.csv jmeter/out/jmeter.log
   # 已绕过：.jmx 的 HTTP Sampler 显式设为 implementation=Java（走 JDK HttpURLConnection），
   # 完全避开默认 HttpClient4 的 HTTPHC4Impl 类初始化失败（WSL 上该静态初始化会抛
   # ExceptionInInitializerError，导致 0 样本）。Java 实现功能等价，足以产出基线数字。
   if "$JMETER_BIN" -n -t jmeter/seckill-baseline.jmx \
-        -l jmeter/results.csv -e -o jmeter/report -j jmeter/jmeter.log; then
+        -l jmeter/out/results.csv -e -o jmeter/out/report -j jmeter/out/jmeter.log; then
     # 用 results.csv 里"以数字开头的数据行"数样本（表头 timeStamp 不以数字开头），
     # 避免 JMeter 0 样本仍写表头导致 [ ! -s ] 误判成功。
-    SAMPLES=$(grep -cE '^[0-9]' jmeter/results.csv 2>/dev/null || true)
+    SAMPLES=$(grep -cE '^[0-9]' jmeter/out/results.csv 2>/dev/null || true)
     if [ "${SAMPLES:-0}" -eq 0 ]; then
-      echo "[!] JMeter 产出 0 样本，回退 curl harness（真实根因见下方 jmeter.log）"
-      grep -A 30 "ExceptionInInitializerError" jmeter/jmeter.log 2>/dev/null | head -40 || true
+      echo "[!] JMeter 产出 0 样本，回退 curl harness（真实根因见下方 jmeter/out/jmeter.log）"
+      grep -A 30 "ExceptionInInitializerError" jmeter/out/jmeter.log 2>/dev/null | head -40 || true
       run_curl_harness
     else
-      echo "[*] 聚合报告 (jmeter/aggregate.csv):"
-      [ -f jmeter/aggregate.csv ] && cat jmeter/aggregate.csv
+      echo "[*] 聚合报告 (jmeter/out/aggregate.csv):"
+      [ -f jmeter/out/aggregate.csv ] && cat jmeter/out/aggregate.csv
       echo "[*] JMeter 实际样本数: $SAMPLES"
-      echo "[*] HTML 报告: jmeter/report/index.html"
+      echo "[*] HTML 报告: jmeter/out/report/index.html"
     fi
   else
     echo "[!] JMeter 运行失败（可能缺 JRE 或 .jmx 不兼容），回退 curl harness"
