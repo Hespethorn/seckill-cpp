@@ -51,9 +51,9 @@ if [ "$MODE" = "correct" ]; then
 fi
 
 # 3) 基线模式：库存给足（1w），让 DB 事务/行锁路径成为瓶颈，持续 60s 测稳态 QPS
-echo "[*] 基线模式：库存置 10000，持续 60s 压测"
+echo "[*] 基线模式：清空订单表 + 库存置 10000，持续 60s 压测"
 mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill \
-  -e "UPDATE seckill_sku SET stock=10000, total=10000 WHERE id=1;"
+  -e "DELETE FROM seckill_order; UPDATE seckill_sku SET stock=10000, total=10000 WHERE id=1;"
 
 rm -rf jmeter/report jmeter/results.csv jmeter/aggregate.csv
 # 注意：本机 apt 装的 jmeter 包装脚本不支持 `-e -o`（会报 Unknown option -e），
