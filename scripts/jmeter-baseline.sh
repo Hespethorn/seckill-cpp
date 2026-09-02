@@ -2,21 +2,20 @@
 # 阶段一基线压测（对应博客 4.4 / 4.5 / 4.7）
 # 前置：MySQL 在跑 + seckill-cpp 已编译并在 :8080 运行。
 # 用法（在 WSL / Git Bash 里用 `bash scripts/jmeter-baseline.sh`，别直接 ./xxx.sh）：
-#   bash scripts/jmeter-baseline.sh            # 默认：60s 并发压测测基线 QPS/延迟（零依赖 curl harness）
+#   bash scripts/jmeter-baseline.sh            # 默认：60s 并发压测测基线 QPS/延迟
 #   bash scripts/jmeter-baseline.sh correct    # 正确性突发：100 抢 10，核对不超卖
-# 注：apt 装的 jmeter 在 WSL 加载 .jmx 会报 xstream ForbiddenClassException，故默认走 curl。
-#     装了官方 Apache JMeter 后：export JMETER_BIN=/path/to/apache-jmeter/bin/jmeter 再运行即走 JMeter 路径。
+#
+# 压测引擎优先级：
+#   1) 若设置了 JMETER_BIN 且指向【官方 Apache JMeter】二进制（推荐，可出 HTML 报告）：
+#        export JMETER_BIN=/opt/apache-jmeter-5.6.3/bin/jmeter
+#      走 `jmeter -n -t jmeter/seckill-baseline.jmx -l ... -e -o ...` 直接出 HTML 报告。
+#   2) 否则回退到零依赖 curl 并发 harness（无需任何 JMeter）。
+# 注意：Ubuntu/Debian `apt install jmeter` 装的是老/缝合怪包（加载 .jmx 报
+#       xstream ForbiddenClassException，且不认 -e -o），不可用；请用官网二进制。
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 MODE="${1:-baseline}"
-
-# 0) 依赖检查：Java + JMeter
-if ! command -v jmeter >/dev/null 2>&1; then
-  echo "[*] 未检测到 jmeter，尝试安装（需 sudo + 网络）…"
-  sudo apt-get update -y
-  sudo apt-get install -y default-jre jmeter
-fi
 
 # 1) MySQL 必须就绪
 if ! mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill -e "SELECT 1;" >/dev/null 2>&1; then
@@ -32,50 +31,15 @@ fi
 
 mkdir -p jmeter
 
-if [ "$MODE" = "correct" ]; then
-  # 正确性突发：库存置 10，100 个唯一用户并发抢，期望 10 成功 / 90 SOLD_OUT / 0 超卖
-  echo "[*] 正确性模式：清空订单表 + 库存置 10，100 抢 10"
+# ---------- 零依赖 curl 并发 harness（保底 / 无 JMeter 时）----------
+run_curl_harness() {
+  local DURATION=60 CONCURRENCY=100 STOCK=100000000 RAW
+  echo "[*] 基线模式（curl harness）：清空订单表 + 库存置 $STOCK，持续 ${DURATION}s 并发压测"
   mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill \
-    -e "DELETE FROM seckill_order; UPDATE seckill_sku SET stock=10, total=10 WHERE id=1;"
-  # 用 curl 并发模拟（简单可复现，不依赖 JMeter GUI）
-  : > /tmp/seckill-correct.out
-  for i in $(seq 1 100); do
-    curl -s -o /dev/null -w "%{http_code}\n" -X POST localhost:8080/api/seckill \
-      -H 'Content-Type: application/json' -d "{\"userId\":$i,\"skuId\":1}" &
-  done > /tmp/seckill-correct.out
-  wait
-  echo "[*] 返回码分布:"
-  sort /tmp/seckill-correct.out | uniq -c
-  echo "[*] 不超卖核对（应 sold=10, orders=10）:"
-  mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill -e \
-    "SELECT (SELECT total FROM seckill_sku WHERE id=1)-(SELECT stock FROM seckill_sku WHERE id=1) AS sold, (SELECT COUNT(*) FROM seckill_order WHERE sku_id=1) AS orders;"
-  exit 0
-fi
+    -e "DELETE FROM seckill_order; UPDATE seckill_sku SET stock=$STOCK, total=$STOCK WHERE id=1;"
 
-# 3) 基线模式：给足库存（默认 1e8，确保 60s 内不会售罄，专测"卖出"事务路径），持续压测测稳态 QPS + 延迟
-# 说明：本机 apt 装的 jmeter 在 WSL 上加载 .jmx 会报 xstream ForbiddenClassException(ScriptWrapper)，
-#       故默认用零依赖的 curl 并发 harness 取基线；若装了官方 Apache JMeter，可设 JMETER_BIN 走原 .jmx 路径。
-DURATION=60
-CONCURRENCY=100
-STOCK=100000000
-
-echo "[*] 基线模式：清空订单表 + 库存置 $STOCK，持续 ${DURATION}s 并发压测"
-mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill \
-  -e "DELETE FROM seckill_order; UPDATE seckill_sku SET stock=$STOCK, total=$STOCK WHERE id=1;"
-
-RAW=$(mktemp)
-
-if [ -n "${JMETER_BIN:-}" ] && command -v "$JMETER_BIN" >/dev/null 2>&1; then
-  # —— 官方 Apache JMeter 路径（需自行下载二进制并 export JMETER_BIN=/path/to/bin/jmeter）——
-  echo "[*] 使用官方 JMeter: $JMETER_BIN"
-  rm -rf jmeter/report jmeter/results.csv jmeter/aggregate.csv
-  "$JMETER_BIN" -n -t jmeter/seckill-baseline.jmx -l jmeter/results.csv -j jmeter/jmeter.log || true
-  "$JMETER_BIN" -g jmeter/results.csv -o jmeter/report 2>/dev/null \
-    || echo "[!] HTML 报告生成失败（不影响 CSV），可忽略"
-  [ -f jmeter/aggregate.csv ] && cat jmeter/aggregate.csv
-else
-  # —— 零依赖 curl 并发 harness（默认）——
-  echo "[*] 使用 curl 并发 harness（apt jmeter 在 WSL 不可用，跳过）"
+  RAW=$(mktemp)
+  local START END ELAPSED TOTAL OK SOLD FAIL QPS
   START=$(date +%s.%N)
   seq 1 1000000 | timeout "$DURATION" xargs -P "$CONCURRENCY" -I{} \
     curl -s -o /dev/null -w "%{http_code} %{time_total}\n" \
@@ -102,6 +66,47 @@ else
       printf "  avg=%.4f  p50=%.4f  p95=%.4f  p99=%.4f  (n=%d)\n", avg, p50, p95, p99, n;
     }'
   rm -f "$RAW"
+}
+
+if [ "$MODE" = "correct" ]; then
+  # 正确性突发：库存置 10，100 个唯一用户并发抢，期望 10 成功 / 90 SOLD_OUT / 0 超卖
+  echo "[*] 正确性模式：清空订单表 + 库存置 10，100 抢 10"
+  mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill \
+    -e "DELETE FROM seckill_order; UPDATE seckill_sku SET stock=10, total=10 WHERE id=1;"
+  : > /tmp/seckill-correct.out
+  for i in $(seq 1 100); do
+    curl -s -o /dev/null -w "%{http_code}\n" -X POST localhost:8080/api/seckill \
+      -H 'Content-Type: application/json' -d "{\"userId\":$i,\"skuId\":1}" &
+  done > /tmp/seckill-correct.out
+  wait
+  echo "[*] 返回码分布:"
+  sort /tmp/seckill-correct.out | uniq -c
+  echo "[*] 不超卖核对（应 sold=10, orders=10）:"
+  mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill -e \
+    "SELECT (SELECT total FROM seckill_sku WHERE id=1)-(SELECT stock FROM seckill_sku WHERE id=1) AS sold, (SELECT COUNT(*) FROM seckill_order WHERE sku_id=1) AS orders;"
+  exit 0
+fi
+
+# ---------- 基线模式 ----------
+if [ -n "${JMETER_BIN:-}" ] && [ -x "$JMETER_BIN" ]; then
+  echo "[*] 使用官方 JMeter: $JMETER_BIN"
+  # 给足库存（1e8，确保 60s 内不售罄，专测"卖出"事务路径）并清空历史订单
+  mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill \
+    -e "DELETE FROM seckill_order; UPDATE seckill_sku SET stock=100000000, total=100000000 WHERE id=1;"
+  rm -rf jmeter/report jmeter/results.csv jmeter/aggregate.csv
+  if "$JMETER_BIN" -n -t jmeter/seckill-baseline.jmx \
+        -l jmeter/results.csv -e -o jmeter/report -j jmeter/jmeter.log; then
+    echo "[*] 聚合报告 (jmeter/aggregate.csv):"
+    [ -f jmeter/aggregate.csv ] && cat jmeter/aggregate.csv
+    echo "[*] HTML 报告: jmeter/report/index.html"
+  else
+    echo "[!] JMeter 运行失败（可能缺 JRE 或 .jmx 不兼容），回退 curl harness"
+    run_curl_harness
+  fi
+else
+  echo "[*] 未设置 JMETER_BIN（或不可执行），使用零依赖 curl harness"
+  echo "[*] 若要用官方 JMeter（出 HTML 报告）：export JMETER_BIN=/path/to/apache-jmeter/bin/jmeter"
+  run_curl_harness
 fi
 
 echo "[*] 不超卖兜底核对（sold 应 == orders，且无超卖）:"
