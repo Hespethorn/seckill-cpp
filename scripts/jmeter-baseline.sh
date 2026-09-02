@@ -99,11 +99,20 @@ if [ -n "${JMETER_BIN:-}" ] && [ -x "$JMETER_BIN" ]; then
   mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill \
     -e "DELETE FROM seckill_order; UPDATE seckill_sku SET stock=100000000, total=100000000 WHERE id=1;"
   rm -rf jmeter/report jmeter/results.csv jmeter/aggregate.csv
+  # 绕行：强制用 JMeter 内置 Java HTTP 实现（jmeter.httpclient=2），避开默认 HC4
+  # （Apache HttpClient4）在部分 JDK/安装下 HTTPHC4Impl 类初始化失败导致 0 样本。
   if "$JMETER_BIN" -n -t jmeter/seckill-baseline.jmx \
+        -Jjmeter.httpclient=2 \
         -l jmeter/results.csv -e -o jmeter/report -j jmeter/jmeter.log; then
-    echo "[*] 聚合报告 (jmeter/aggregate.csv):"
-    [ -f jmeter/aggregate.csv ] && cat jmeter/aggregate.csv
-    echo "[*] HTML 报告: jmeter/report/index.html"
+    # JMeter 可能退出 0 但产出 0 样本（如 HTTPHC4Impl 类初始化失败会静默 0 样本）
+    if [ ! -s jmeter/results.csv ]; then
+      echo "[!] JMeter 产出 0 样本（疑似 HTTP 客户端类初始化失败），回退 curl harness"
+      run_curl_harness
+    else
+      echo "[*] 聚合报告 (jmeter/aggregate.csv):"
+      [ -f jmeter/aggregate.csv ] && cat jmeter/aggregate.csv
+      echo "[*] HTML 报告: jmeter/report/index.html"
+    fi
   else
     echo "[!] JMeter 运行失败（可能缺 JRE 或 .jmx 不兼容），回退 curl harness"
     run_curl_harness
