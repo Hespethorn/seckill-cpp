@@ -99,22 +99,22 @@ if [ -n "${JMETER_BIN:-}" ] && [ -x "$JMETER_BIN" ] && [ -f jmeter/seckill-basel
   mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill \
     -e "DELETE FROM seckill_order; UPDATE seckill_sku SET stock=100000000, total=100000000 WHERE id=1;"
   rm -rf jmeter/report jmeter/results.csv jmeter/aggregate.csv
-  # 注意：JMeter 5.6.3 的 jmeter.httpclient 合法值只有 3(HC3,废弃)/4(HC4,默认)，
-  # 没有"Java 原生实现=2"（那是 3.x/4.x 的历史值，5.x 已移除）。故无法用 flag 绕开 HC4。
-  # HTTPHC4Impl 类初始化失败（ExceptionInInitializerError）在 WSL 上多为 JMeter 包损坏
-  # （jar 截断导致静态初始化 NoClassDefFoundError）。本机实测 JDK 11.0.32 属认证范围，
-  # 非 JDK 问题；重下官方包并 sha512 校验即可。
+  # 已绕过：.jmx 的 HTTP Sampler 显式设为 implementation=Java（走 JDK HttpURLConnection），
+  # 完全避开默认 HttpClient4 的 HTTPHC4Impl 类初始化失败（WSL 上该静态初始化会抛
+  # ExceptionInInitializerError，导致 0 样本）。Java 实现功能等价，足以产出基线数字。
   if "$JMETER_BIN" -n -t jmeter/seckill-baseline.jmx \
         -l jmeter/results.csv -e -o jmeter/report -j jmeter/jmeter.log; then
-    # JMeter 可能退出 0 但产出 0 样本（HTTPHC4Impl 类初始化失败会静默 0 样本）
-    if [ ! -s jmeter/results.csv ]; then
-      echo "[!] JMeter 产出 0 样本（HTTPHC4Impl 类初始化失败），回退 curl harness"
-      echo "[!] 真实根因见 jmeter/jmeter.log，典型：JDK 过新(21) 或 JMeter 包损坏。"
-      echo "[!] 速查：grep -A 30 ExceptionInInitializerError jmeter/jmeter.log | head -40"
+    # 用 results.csv 里"以数字开头的数据行"数样本（表头 timeStamp 不以数字开头），
+    # 避免 JMeter 0 样本仍写表头导致 [ ! -s ] 误判成功。
+    SAMPLES=$(grep -cE '^[0-9]' jmeter/results.csv 2>/dev/null || true)
+    if [ "${SAMPLES:-0}" -eq 0 ]; then
+      echo "[!] JMeter 产出 0 样本，回退 curl harness（真实根因见下方 jmeter.log）"
+      grep -A 30 "ExceptionInInitializerError" jmeter/jmeter.log 2>/dev/null | head -40 || true
       run_curl_harness
     else
       echo "[*] 聚合报告 (jmeter/aggregate.csv):"
       [ -f jmeter/aggregate.csv ] && cat jmeter/aggregate.csv
+      echo "[*] JMeter 实际样本数: $SAMPLES"
       echo "[*] HTML 报告: jmeter/report/index.html"
     fi
   else
