@@ -27,6 +27,11 @@ public:
     void listSkus(const drogon::HttpRequestPtr &req,
                   std::function<void(const drogon::HttpResponsePtr &)> &&callback);
 
+    // 4.2 商品详情：GET /api/seckill/{skuId}（路径参数走三参 handler）
+    void detailSku(const drogon::HttpRequestPtr &req,
+                   std::function<void(const drogon::HttpResponsePtr &)> &&callback,
+                   const std::string &skuIdStr);
+
 private:
     std::shared_ptr<SeckillService> svc_;
 };

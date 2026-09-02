@@ -1,5 +1,6 @@
 #include "SeckillController.h"
 #include <json/json.h>
+#include <string>
 #include "logging/LogStream.h"
 
 void SeckillController::seckill(
@@ -64,6 +65,45 @@ void SeckillController::listSkus(
                 root["code"] = 1;
                 root["msg"] = "query failed";
                 httpStatus = drogon::k500InternalServerError;
+            }
+            auto resp = drogon::HttpResponse::newHttpJsonResponse(root);
+            resp->setStatusCode(httpStatus);
+            callback(resp);
+        });
+}
+
+void SeckillController::detailSku(
+    const drogon::HttpRequestPtr &,
+    std::function<void(const drogon::HttpResponsePtr &)> &&callback,
+    const std::string &skuIdStr) {
+    // 路径参数校验：skuId 必须是正整数。非法直接 400，不进 DB。
+    int64_t skuId = -1;
+    try {
+        skuId = std::stoll(skuIdStr);
+    } catch (...) {
+        skuId = -1;
+    }
+    if (skuId <= 0) {
+        Json::Value err;
+        err["code"] = 400;
+        err["msg"] = "invalid skuId";
+        auto resp = drogon::HttpResponse::newHttpJsonResponse(err);
+        resp->setStatusCode(drogon::k400BadRequest);
+        callback(resp);
+        return;
+    }
+
+    svc_->detailSku(skuId,
+        [callback](bool ok, const Json::Value &data) mutable {
+            Json::Value root;
+            int httpStatus = drogon::k200Ok;
+            if (ok) {
+                root["code"] = 0;
+                root["data"] = data;  // Json 对象
+            } else {
+                root["code"] = 1;
+                root["msg"] = "sku not found";
+                httpStatus = drogon::k404NotFound;
             }
             auto resp = drogon::HttpResponse::newHttpJsonResponse(root);
             resp->setStatusCode(httpStatus);

@@ -44,6 +44,12 @@ public:
     //   ok=false -> data 为空（查询失败，已记日志）
     void listSkus(std::function<void(bool, const Json::Value &)> &&callback);
 
+    // 4.2 秒杀商品详情（按 id 查单个，只读）。回调 (ok, data)：
+    //   ok=true  -> data 为 Json 对象（单条商品）
+    //   ok=false -> data 为空，表示 sku 不存在（前端应展示 404）
+    void detailSku(int64_t skuId,
+                   std::function<void(bool, const Json::Value &)> &&callback);
+
 private:
     drogon::orm::DbClientPtr db_;
     std::shared_ptr<seckill::InflightGuard> inflight_;

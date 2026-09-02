@@ -191,3 +191,37 @@ void SeckillService::listSkus(
             }
         });
 }
+
+void SeckillService::detailSku(
+    int64_t skuId,
+    std::function<void(bool, const Json::Value &)> &&callback) {
+    db_->execSqlAsync(
+        "SELECT id, name, stock, total, "
+        "DATE_FORMAT(start_time, '%Y-%m-%d %H:%i:%s') AS start_time, "
+        "DATE_FORMAT(end_time, '%Y-%m-%d %H:%i:%s') AS end_time "
+        "FROM seckill_sku WHERE id = ?",
+        [cb = std::move(callback)](const drogon::orm::Result &result) {
+            if (result.size() == 0) {
+                cb(false, Json::Value());  // 不存在
+                return;
+            }
+            const auto &row = result[0];
+            Json::Value item;
+            item["id"] = row["id"].as<int64_t>();
+            item["name"] = row["name"].as<std::string>();
+            item["stock"] = row["stock"].as<int>();
+            item["total"] = row["total"].as<int>();
+            item["startTime"] = row["start_time"].as<std::string>();
+            item["endTime"] = row["end_time"].as<std::string>();
+            cb(true, item);
+        },
+        [cb = std::move(callback)](const std::exception_ptr &eptr) {
+            try {
+                std::rethrow_exception(eptr);
+            } catch (const std::exception &ex) {
+                SK_LOG_ERROR << "DETAIL_SKU_FAILED err=" << ex.what();
+                cb(false, Json::Value());
+            }
+        },
+        skuId);
+}
