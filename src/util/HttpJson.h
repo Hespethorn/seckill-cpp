@@ -1,7 +1,6 @@
 #pragma once
 
 #include <drogon/HttpResponse.h>
-#include <drogon/HttpStatusCode.h>
 #include <json/json.h>
 
 #include <functional>
@@ -23,7 +22,7 @@ namespace seckill::http {
 
 inline drogon::HttpResponsePtr jsonResponse(
     int code, const std::string &msg,
-    drogon::HttpStatusCode status = drogon::k200Ok) {
+    drogon::HttpStatusCode status = drogon::k200OK) {
     Json::Value root;
     root["code"] = code;
     root["msg"] = msg;
@@ -35,14 +34,14 @@ inline drogon::HttpResponsePtr jsonResponse(
 inline void reply(
     std::function<void(const drogon::HttpResponsePtr &)> &&callback,
     int code, const std::string &msg,
-    drogon::HttpStatusCode status = drogon::k200Ok) {
+    drogon::HttpStatusCode status = drogon::k200OK) {
     callback(jsonResponse(code, msg, status));
 }
 
 inline void replyData(
     std::function<void(const drogon::HttpResponsePtr &)> &&callback,
     int code, const Json::Value &data,
-    drogon::HttpStatusCode status = drogon::k200Ok) {
+    drogon::HttpStatusCode status = drogon::k200OK) {
     Json::Value root;
     root["code"] = code;
     root["data"] = data;
