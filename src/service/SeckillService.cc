@@ -163,12 +163,18 @@ void SeckillService::listSkus(
     // 只读查询，不需要事务——直接走 DbClient。start_time/end_time 用 DATE_FORMAT
     // 显式转成字符串，避免 Drogon 把 DATETIME 绑成 tm/Date 类型带来的歧义。
     // 列表接口只暴露"够前端展示"的字段，不返回 create_time 等内部字段。
+    //
+    // 回调所有权：callback 是右值引用参数，而异步 DB 回调在 listSkus 返回后才触发，
+    // 所以必须先按值捕获进 cb（一次 move 到函数作用域），再让成功/失败两个 lambda 各自【拷贝】cb。
+    // 绝不可对同一个 callback 做两次 std::move：第一次 move 后 callback 已空，
+    // 第二次 move 进错误 lambda 的会是一个空 std::function，DB 一报错就 bad_function_call 直接宕机。
+    auto cb = std::move(callback);
     db_->execSqlAsync(
         "SELECT id, name, stock, total, "
         "DATE_FORMAT(start_time, '%Y-%m-%d %H:%i:%s') AS start_time, "
         "DATE_FORMAT(end_time, '%Y-%m-%d %H:%i:%s') AS end_time "
         "FROM seckill_sku ORDER BY id ASC LIMIT 100",
-        [cb = std::move(callback)](const drogon::orm::Result &result) {
+        [cb](const drogon::orm::Result &result) {
             Json::Value arr(Json::arrayValue);
             for (const auto &row : result) {
                 Json::Value item;
@@ -182,7 +188,7 @@ void SeckillService::listSkus(
             }
             cb(true, arr);
         },
-        [cb = std::move(callback)](const std::exception_ptr &eptr) {
+        [cb](const std::exception_ptr &eptr) {
             try {
                 std::rethrow_exception(eptr);
             } catch (const std::exception &ex) {
@@ -195,12 +201,15 @@ void SeckillService::listSkus(
 void SeckillService::detailSku(
     int64_t skuId,
     std::function<void(bool, const Json::Value &)> &&callback) {
+    // 回调所有权同 listSkus：先 move 进 cb，两个 lambda 各自拷贝 cb，
+    // 避免对同一个 callback 二次 move 导致错误路径调用空 std::function 而宕机。
+    auto cb = std::move(callback);
     db_->execSqlAsync(
         "SELECT id, name, stock, total, "
         "DATE_FORMAT(start_time, '%Y-%m-%d %H:%i:%s') AS start_time, "
         "DATE_FORMAT(end_time, '%Y-%m-%d %H:%i:%s') AS end_time "
         "FROM seckill_sku WHERE id = ?",
-        [cb = std::move(callback)](const drogon::orm::Result &result) {
+        [cb](const drogon::orm::Result &result) {
             if (result.size() == 0) {
                 cb(false, Json::Value());  // 不存在
                 return;
@@ -215,7 +224,7 @@ void SeckillService::detailSku(
             item["endTime"] = row["end_time"].as<std::string>();
             cb(true, item);
         },
-        [cb = std::move(callback)](const std::exception_ptr &eptr) {
+        [cb](const std::exception_ptr &eptr) {
             try {
                 std::rethrow_exception(eptr);
             } catch (const std::exception &ex) {
