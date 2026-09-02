@@ -220,6 +220,15 @@ int main() {
         },
         {drogon::Post});
 
+    // 4.1 秒杀商品列表（只读，GET）
+    drogon::app().registerHandler(
+        "/api/seckill/list",
+        [](const drogon::HttpRequestPtr &req,
+           std::function<void(const drogon::HttpResponsePtr &)> &&callback) {
+            bundle().seckill->listSkus(req, std::move(callback));
+        },
+        {drogon::Get});
+
     // 在途闸门统计：压测后直接看应用层挡掉了多少请求（4.8 的量化收益）
     drogon::app().registerHandler(
         "/api/lock/stats",

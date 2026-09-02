@@ -49,3 +49,24 @@ void SeckillController::seckill(
             callback(resp);
         });
 }
+
+void SeckillController::listSkus(
+    const drogon::HttpRequestPtr &,
+    std::function<void(const drogon::HttpResponsePtr &)> &&callback) {
+    svc_->listSkus(
+        [callback](bool ok, const Json::Value &data) mutable {
+            Json::Value root;
+            int httpStatus = drogon::k200Ok;
+            if (ok) {
+                root["code"] = 0;
+                root["data"] = data;  // Json 数组
+            } else {
+                root["code"] = 1;
+                root["msg"] = "query failed";
+                httpStatus = drogon::k500InternalServerError;
+            }
+            auto resp = drogon::HttpResponse::newHttpJsonResponse(root);
+            resp->setStatusCode(httpStatus);
+            callback(resp);
+        });
+}

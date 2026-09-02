@@ -2,6 +2,9 @@
 #include <drogon/HttpController.h>
 #include <functional>
 #include <memory>
+
+#include <json/json.h>
+
 #include "service/SeckillService.h"
 
 // 秒杀接口控制器：只做协议转换（JSON <-> 业务参数），不含任何库存逻辑。
@@ -19,6 +22,10 @@ public:
 
     void seckill(const drogon::HttpRequestPtr &req,
                  std::function<void(const drogon::HttpResponsePtr &)> &&callback);
+
+    // 4.1 商品列表：GET /api/seckill/list
+    void listSkus(const drogon::HttpRequestPtr &req,
+                  std::function<void(const drogon::HttpResponsePtr &)> &&callback);
 
 private:
     std::shared_ptr<SeckillService> svc_;

@@ -3,6 +3,9 @@
 #include <drogon/orm/Exception.h>
 #include <drogon/orm/Result.h>
 
+#include <exception>
+#include <json/json.h>
+
 #include "logging/LogStream.h"
 
 using namespace seckill;  // InflightGuard / InflightToken 都定义在 seckill 命名空间
@@ -152,5 +155,39 @@ void SeckillService::doSeckill(
                     }
                 },
                 skuId);
+        });
+}
+
+void SeckillService::listSkus(
+    std::function<void(bool, const Json::Value &)> &&callback) {
+    // 只读查询，不需要事务——直接走 DbClient。start_time/end_time 用 DATE_FORMAT
+    // 显式转成字符串，避免 Drogon 把 DATETIME 绑成 tm/Date 类型带来的歧义。
+    // 列表接口只暴露"够前端展示"的字段，不返回 create_time 等内部字段。
+    db_->execSqlAsync(
+        "SELECT id, name, stock, total, "
+        "DATE_FORMAT(start_time, '%Y-%m-%d %H:%i:%s') AS start_time, "
+        "DATE_FORMAT(end_time, '%Y-%m-%d %H:%i:%s') AS end_time "
+        "FROM seckill_sku ORDER BY id ASC LIMIT 100",
+        [cb = std::move(callback)](const drogon::orm::Result &result) {
+            Json::Value arr(Json::arrayValue);
+            for (const auto &row : result) {
+                Json::Value item;
+                item["id"] = row["id"].as<int64_t>();
+                item["name"] = row["name"].as<std::string>();
+                item["stock"] = row["stock"].as<int>();
+                item["total"] = row["total"].as<int>();
+                item["startTime"] = row["start_time"].as<std::string>();
+                item["endTime"] = row["end_time"].as<std::string>();
+                arr.append(item);
+            }
+            cb(true, arr);
+        },
+        [cb = std::move(callback)](const std::exception_ptr &eptr) {
+            try {
+                std::rethrow_exception(eptr);
+            } catch (const std::exception &ex) {
+                SK_LOG_ERROR << "LIST_SKU_FAILED err=" << ex.what();
+                cb(false, Json::Value());
+            }
         });
 }

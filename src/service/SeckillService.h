@@ -6,6 +6,8 @@
 #include <memory>
 #include <string>
 
+#include <json/json.h>
+
 #include "InflightGuard.h"
 
 // 秒杀业务服务（阶段一：直接打数据库）。
@@ -36,6 +38,11 @@ public:
     void doSeckill(int64_t userId,
                    int64_t skuId,
                    std::function<void(bool, const std::string &)> &&callback);
+
+    // 4.1 秒杀商品列表（只读，不需要事务）。回调 (ok, data)：
+    //   ok=true  -> data 为 Json 数组，元素含 id/name/stock/total/startTime/endTime
+    //   ok=false -> data 为空（查询失败，已记日志）
+    void listSkus(std::function<void(bool, const Json::Value &)> &&callback);
 
 private:
     drogon::orm::DbClientPtr db_;
