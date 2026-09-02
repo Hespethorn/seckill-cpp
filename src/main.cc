@@ -22,6 +22,9 @@ std::shared_ptr<SeckillController> getSeckillController() {
     static std::shared_ptr<SeckillController> ctrl = [] {
         auto db = drogon::app().getDbClient("default");
         if (!db) {
+            // 这里刻意用 Drogon 的同步 LOG_FATAL，而不是异步的 SK_LOG_*：
+            // 进程马上要 exit，异步日志还躺在环形缓冲里来不及被后台线程取走，
+            // 致命错误必须同步落盘，否则现场直接丢失。
             LOG_FATAL << "getDbClient(\"default\") returned null after run(): "
                          "check db_clients in config.json and Drogon MySQL support.";
             exit(1);

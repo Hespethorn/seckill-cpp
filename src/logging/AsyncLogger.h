@@ -39,6 +39,14 @@ public:
     // 业务线程入口：非阻塞，满则丢。
     void log(spdlog::level::level_enum lvl, std::string msg);
 
+    // 级别短路：业务线程在"拼字符串之前"先问一句这条要不要打。
+    // 秒杀洪峰期如果每条 debug/info 都先拼完再在后台被级别过滤掉，
+    // 白白付出的 CPU 会直接吃掉业务线程的时间片——SK_LOG_* 宏靠它做短路。
+    bool enabled(spdlog::level::level_enum lvl) const {
+        return running_.load(std::memory_order_relaxed) &&
+               static_cast<int>(lvl) >= level_.load(std::memory_order_relaxed);
+    }
+
     // 被丢弃的日志条数（自启动以来累计）。
     std::size_t dropped() const { return buf_.dropped(); }
 
@@ -54,6 +62,8 @@ private:
     std::shared_ptr<spdlog::logger> fileLogger_;
     std::thread worker_;
     std::atomic<bool> running_{false};
+    // 配置的日志级别（int 化存 atomic，供 enabled() 在业务线程无锁读取）
+    std::atomic<int> level_{static_cast<int>(spdlog::level::info)};
 };
 
 }  // namespace seckill::log

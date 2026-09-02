@@ -1,7 +1,7 @@
 #include "SeckillService.h"
 #include <drogon/orm/Result.h>
 #include <drogon/orm/Exception.h>
-#include "logging/AsyncLogger.h"
+#include "logging/LogStream.h"
 
 SeckillService::SeckillService(drogon::orm::DbClientPtr client)
     : db_(std::move(client)) {}
@@ -29,6 +29,9 @@ void SeckillService::doSeckill(
             const std::shared_ptr<drogon::orm::Transaction> &tx) {
             if (!tx) {
                 // 文档说明：超时情况下回调会拿到空的 shared_ptr。
+                // 这条是系统级故障信号（连接池耗尽/DB 不可达），必须留痕。
+                SK_LOG_ERROR << "no transaction (timeout) userId=" << userId
+                             << " skuId=" << skuId;
                 cb(false, "DB_ERROR: no transaction (timeout)");
                 return;
             }
@@ -50,10 +53,9 @@ void SeckillService::doSeckill(
                 [tx, userId, skuId, cb](const drogon::orm::Result &result) {
                     if (result.affectedRows() == 0) {
                         tx->rollback();
-                        // 异步告警日志：不阻塞业务线程（环形缓冲满则丢弃，见 AsyncLogger）
-                        seckill::log::AsyncLogger::instance().log(
-                            spdlog::level::warn,
-                            "SOLD_OUT skuId=" + std::to_string(skuId));
+                        // 售罄是业务预期内的结果（不是故障），用 warn 而非 error：
+                        // 洪峰期这个日志会刷屏，靠级别短路 + drop-newest 兜底。
+                        SK_LOG_WARN << "SOLD_OUT skuId=" << skuId;
                         cb(false, "SOLD_OUT");
                         return;
                     }
@@ -81,34 +83,44 @@ void SeckillService::doSeckill(
                                 // 重复下单：回滚把步骤 1 扣掉的库存还回去，
                                 // 否则用户每重复点一次就白白吃掉一件库存。
                                 tx->rollback();
-                                seckill::log::AsyncLogger::instance().log(
-                                    spdlog::level::warn,
-                                    "DUPLICATE_ORDER userId=" + std::to_string(userId) +
-                                        " skuId=" + std::to_string(skuId));
+                                SK_LOG_WARN << "DUPLICATE_ORDER userId=" << userId
+                                            << " skuId=" << skuId;
                                 cb(false, "DUPLICATE_ORDER");
                                 return;
                             }
+
+                            // 下单成功：info 级（生产可调高 level 关掉，避免洪峰期刷屏）
+                            SK_LOG_INFO << "SECKILL_OK userId=" << userId
+                                        << " skuId=" << skuId;
 
                             // 提交路径：v1.9.10 没有 commit() 成员，不手动提交。
                             // 本 lambda 返回后，tx 在各层 lambda 的拷贝相继析构，
                             // 触发自动 commit → setCommitCallback → cb(true, "OK")。
                             // 回滚路径已各自显式调 cb，commitCallback 不会重复触发。
                         },
-                        [tx, cb](const std::exception_ptr &eptr) {
+                        [tx, userId, skuId, cb](const std::exception_ptr &eptr) {
                             tx->rollback();
                             try {
                                 std::rethrow_exception(eptr);
                             } catch (const std::exception &ex) {
+                                // INSERT 失败是系统级故障（不是业务拒绝），必须留痕
+                                SK_LOG_ERROR << "INSERT_ORDER_FAILED userId=" << userId
+                                             << " skuId=" << skuId
+                                             << " err=" << ex.what();
                                 cb(false, std::string("DB_ERROR: ") + ex.what());
                             }
                         },
                         userId, skuId);
                 },
-                [tx, cb](const std::exception_ptr &eptr) {
+                [userId, skuId, tx, cb](const std::exception_ptr &eptr) {
                     tx->rollback();
                     try {
                         std::rethrow_exception(eptr);
                     } catch (const std::exception &ex) {
+                        // UPDATE 失败同上：库存扣减这一步挂了，是故障不是售罄
+                        SK_LOG_ERROR << "DEDUCT_STOCK_FAILED userId=" << userId
+                                     << " skuId=" << skuId
+                                     << " err=" << ex.what();
                         cb(false, std::string("DB_ERROR: ") + ex.what());
                     }
                 },

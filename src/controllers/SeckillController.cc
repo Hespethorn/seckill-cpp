@@ -1,5 +1,6 @@
 #include "SeckillController.h"
 #include <json/json.h>
+#include "logging/LogStream.h"
 
 void SeckillController::seckill(
     const drogon::HttpRequestPtr &req,
@@ -9,6 +10,11 @@ void SeckillController::seckill(
     //    不是裸指针，故用 const auto & 接，并以 !json 判空、(*json)[...] 取值。
     const auto &json = req->getJsonObject();
     if (!json || !json->isMember("userId") || !json->isMember("skuId")) {
+        // 参数校验失败是客户端问题（不该出现在正常流量里），用 warn 留痕即可，
+        // 既便于发现异常调用方，又不会像 error 那样在监控里被当成系统故障告警。
+        SK_LOG_WARN << "BAD_REQUEST missing/invalid userId/skuId"
+                    << " path=" << req->getPath()
+                    << " remote=" << req->getPeerAddr().toIpPort();
         Json::Value err;
         err["code"] = 400;
         err["msg"] = "missing or invalid userId/skuId";

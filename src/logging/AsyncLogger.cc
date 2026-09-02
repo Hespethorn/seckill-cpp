@@ -16,6 +16,8 @@ void AsyncLogger::start(const std::string &file, spdlog::level::level_enum level
     if (running_.exchange(true)) {
         return;  // 已启动，幂等
     }
+    // 先记下级别：enabled() 在业务线程靠它做短路，必须早于任何 log() 可见
+    level_.store(static_cast<int>(level), std::memory_order_relaxed);
 
     try {
         // spdlog 的 file sink 不会自动建目录，先补上（如 ./logs）。
