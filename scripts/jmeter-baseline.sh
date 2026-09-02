@@ -99,14 +99,17 @@ if [ -n "${JMETER_BIN:-}" ] && [ -x "$JMETER_BIN" ]; then
   mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill \
     -e "DELETE FROM seckill_order; UPDATE seckill_sku SET stock=100000000, total=100000000 WHERE id=1;"
   rm -rf jmeter/report jmeter/results.csv jmeter/aggregate.csv
-  # 绕行：强制用 JMeter 内置 Java HTTP 实现（jmeter.httpclient=2），避开默认 HC4
-  # （Apache HttpClient4）在部分 JDK/安装下 HTTPHC4Impl 类初始化失败导致 0 样本。
+  # 注意：JMeter 5.6.3 的 jmeter.httpclient 合法值只有 3(HC3,废弃)/4(HC4,默认)，
+  # 没有"Java 原生实现=2"（那是 3.x/4.x 的历史值，5.x 已移除）。故无法用 flag 绕开 HC4。
+  # HTTPHC4Impl 类初始化失败（ExceptionInInitializerError）在 WSL 上多为：
+  #   (a) JDK 过新（21，5.6.3 仅认证 8/11/17）；(b) JMeter 包损坏。两者都需改环境而非脚本。
   if "$JMETER_BIN" -n -t jmeter/seckill-baseline.jmx \
-        -Jjmeter.httpclient=2 \
         -l jmeter/results.csv -e -o jmeter/report -j jmeter/jmeter.log; then
-    # JMeter 可能退出 0 但产出 0 样本（如 HTTPHC4Impl 类初始化失败会静默 0 样本）
+    # JMeter 可能退出 0 但产出 0 样本（HTTPHC4Impl 类初始化失败会静默 0 样本）
     if [ ! -s jmeter/results.csv ]; then
-      echo "[!] JMeter 产出 0 样本（疑似 HTTP 客户端类初始化失败），回退 curl harness"
+      echo "[!] JMeter 产出 0 样本（HTTPHC4Impl 类初始化失败），回退 curl harness"
+      echo "[!] 真实根因见 jmeter/jmeter.log，典型：JDK 过新(21) 或 JMeter 包损坏。"
+      echo "[!] 速查：grep -A 30 ExceptionInInitializerError jmeter/jmeter.log | head -40"
       run_curl_harness
     else
       echo "[*] 聚合报告 (jmeter/aggregate.csv):"
