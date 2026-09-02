@@ -90,6 +90,11 @@ fi
 # ---------- 基线模式 ----------
 if [ -n "${JMETER_BIN:-}" ] && [ -x "$JMETER_BIN" ]; then
   echo "[*] 使用官方 JMeter: $JMETER_BIN"
+  # 关键修复：禁用 Java/JMeter 代理。本机若设了 http_proxy（如 127.0.0.1:9305），
+  # Java 会把它当 http.proxyHost，把请求路由到代理而非 127.0.0.1:8080 → 100% connection refused。
+  echo "[*] 代理环境: http_proxy=${http_proxy:-<空>} https_proxy=${https_proxy:-<空>} JAVA_TOOL_OPTIONS=${JAVA_TOOL_OPTIONS:-<空>}"
+  unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY no_proxy NO_PROXY 2>/dev/null || true
+  export JVM_ARGS="${JVM_ARGS:-} -Dhttp.proxyHost= -Dhttps.proxyHost= -Dhttp.proxyPort= -Dhttps.proxyPort= -Djava.net.useSystemProxies=false"
   # 给足库存（1e8，确保 60s 内不售罄，专测"卖出"事务路径）并清空历史订单
   mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill \
     -e "DELETE FROM seckill_order; UPDATE seckill_sku SET stock=100000000, total=100000000 WHERE id=1;"
