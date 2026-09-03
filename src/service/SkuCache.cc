@@ -1,10 +1,113 @@
 #include "SkuCache.h"
 
+#include <condition_variable>
+#include <deque>
+#include <mutex>
 #include <random>
+#include <thread>
 
 #include "logging/LogStream.h"
 
 namespace seckill::cache {
+namespace {
+
+// 5.4 延迟双删的专用执行线程（延时队列实现）。
+//
+// 为什么需要这个线程而不是在 IO 线程里 sleep：Drogon 的 handler 跑在 IO 线程上，
+// 一次 sleep 会把该线程上排队的所有请求一起卡住（红线，见 docs/PLAN.md ADR-2）。
+// 这里开一个**专用**后台线程，消费"到点再删"的任务队列；投递端（IO 线程）只做
+// push + notify，纳秒级返回。到点后由本线程发起 Redis 的异步 DEL（execCommandAsync
+// 是线程安全的，会把命令投递回 Redis 客户端所在的事件循环，不在这里阻塞等结果）。
+class DelayDeleter {
+public:
+    using FireFn = std::function<void(std::vector<std::string>)>;
+
+    DelayDeleter(std::chrono::milliseconds delay, FireFn fire)
+        : delay_(delay), fire_(std::move(fire)), stop_(false) {
+        thread_ = std::thread([this] { run(); });
+    }
+
+    ~DelayDeleter() {
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            stop_ = true;
+        }
+        cv_.notify_all();
+        if (thread_.joinable()) thread_.join();
+    }
+
+    void schedule(std::vector<std::string> keys) {
+        if (keys.empty()) return;
+        {
+            std::lock_guard<std::mutex> lk(m_);
+            queue_.push_back({std::chrono::steady_clock::now() + delay_,
+                              std::move(keys)});
+        }
+        cv_.notify_one();
+    }
+
+private:
+    struct Task {
+        std::chrono::steady_clock::time_point fireAt;
+        std::vector<std::string> keys;
+    };
+
+    void run() {
+        std::unique_lock<std::mutex> lk(m_);
+        while (!stop_) {
+            if (queue_.empty()) {
+                cv_.wait(lk);
+                continue;
+            }
+            auto &next = queue_.front();
+            if (std::chrono::steady_clock::now() < next.fireAt) {
+                cv_.wait_until(lk, next.fireAt);
+                continue;
+            }
+            auto keys = std::move(next.keys);
+            queue_.pop_front();
+            lk.unlock();  // 执行 DEL 期间不持锁：新任务可以继续入队
+            fire_(std::move(keys));
+            lk.lock();
+        }
+    }
+
+    std::chrono::milliseconds delay_;
+    FireFn fire_;
+    std::mutex m_;
+    std::condition_variable cv_;
+    std::deque<Task> queue_;
+    bool stop_;
+    std::thread thread_;
+};
+
+}  // namespace
+
+SkuCache::SkuCache(drogon::nosql::RedisClientPtr redis, CacheKeys keys, Config cfg)
+    : redis_(std::move(redis)), keys_(std::move(keys)), cfg_(cfg) {
+    // doubleDeleteMs > 0 才拉起延迟删除线程；0 是默认（单 DEL + TTL 自愈已够用）。
+    // 线程的 fire 回调直接落到本类的 del()：延迟线程析构先于 redis_（成员逆序析构），
+    // 所以 join 期间访问 redis_ 是安全的。
+    if (cfg_.doubleDeleteMs > 0 && redis_) {
+        delayDeleter_ = std::make_unique<DelayDeleter>(
+            std::chrono::milliseconds(cfg_.doubleDeleteMs),
+            [this](std::vector<std::string> keys) {
+                delayedDelete_.fetch_add(1, std::memory_order_relaxed);
+                for (const auto &k : keys) del(k);
+            });
+        SK_LOG_INFO << "cache double-delete enabled: delay=" << cfg_.doubleDeleteMs
+                    << "ms";
+    }
+}
+
+SkuCache::~SkuCache() {
+    // 先停延迟删除线程（unique_ptr 析构会 join），再按声明逆序析构其余成员。
+    delayDeleter_.reset();
+}
+
+void SkuCache::scheduleDelayedDelete(std::vector<std::string> keys) {
+    if (delayDeleter_) delayDeleter_->schedule(std::move(keys));
+}
 
 int SkuCache::ttlWithJitter(int baseSeconds) const {
     if (cfg_.jitterSeconds <= 0) return baseSeconds;
@@ -117,10 +220,16 @@ void SkuCache::invalidate(int64_t skuId) {
                          << " err=" << e.what();
         },
         "DEL %s %s", itemKey.c_str(), listKey.c_str());
+    // 5.4 延迟双删：DEL 之后还有一段"旧值回填窗口"（读请求在 DEL 前读到旧值、
+    // 在 DEL 后才回写）。延时到点后把同一组 key 再删一次，清掉窗口内回填的旧值。
+    scheduleDelayedDelete({itemKey, listKey});
 }
 
 void SkuCache::invalidateItem(int64_t skuId) {
-    del(keys_.item(skuId));
+    if (!cfg_.enabled || !redis_) return;
+    const std::string key = keys_.item(skuId);
+    del(key);
+    scheduleDelayedDelete({key});
 }
 
 void SkuCache::invalidateOnOrder(int64_t skuId) {
@@ -138,7 +247,10 @@ void SkuCache::invalidateOnOrder(int64_t skuId) {
 }
 
 void SkuCache::invalidateList() {
-    del(keys_.list());
+    if (!cfg_.enabled || !redis_) return;
+    const std::string key = keys_.list();
+    del(key);
+    scheduleDelayedDelete({key});
 }
 
 SkuCache::Stats SkuCache::stats() const {
@@ -147,6 +259,7 @@ SkuCache::Stats SkuCache::stats() const {
     s.miss = miss_.load(std::memory_order_relaxed);
     s.err = err_.load(std::memory_order_relaxed);
     s.write = write_.load(std::memory_order_relaxed);
+    s.delayedDelete = delayedDelete_.load(std::memory_order_relaxed);
     return s;
 }
 

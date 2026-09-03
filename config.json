@@ -54,6 +54,7 @@
       "detail_ttl_seconds": 60,
       "null_ttl_seconds": 60,
       "jitter_seconds": 30,
+      "double_delete_ms": 0,
       "invalidate_on_order": "item"
     }
   },

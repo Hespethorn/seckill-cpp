@@ -131,6 +131,7 @@ AppBundle buildBundle() {
         cacheCfg.detailTtlSeconds = cfgInt(c, "detail_ttl_seconds", 60);
         cacheCfg.nullTtlSeconds = cfgInt(c, "null_ttl_seconds", 60);
         cacheCfg.jitterSeconds = cfgInt(c, "jitter_seconds", 30);
+        cacheCfg.doubleDeleteMs = cfgInt(c, "double_delete_ms", 0);  // 5.4，0=关
         cacheCfg.invalidateOnOrder =
             parseInvalidateOnOrder(cfgStr(c, "invalidate_on_order", "item"));
 
@@ -144,6 +145,7 @@ AppBundle buildBundle() {
                  << " listTTL=" << cacheCfg.listTtlSeconds
                  << " detailTTL=" << cacheCfg.detailTtlSeconds
                  << " jitter=" << cacheCfg.jitterSeconds
+                 << " doubleDeleteMs=" << cacheCfg.doubleDeleteMs
                  << " invalidateOnOrder=" << invalidateName(cacheCfg.invalidateOnOrder)
                  << " keyPrefix=" << keys.prefix() << ":" << keys.version();
     }
@@ -308,6 +310,7 @@ int main() {
                 d["miss"] = Json::UInt64(s.miss);
                 d["err"] = Json::UInt64(s.err);
                 d["write"] = Json::UInt64(s.write);
+                d["delayed_delete"] = Json::UInt64(s.delayedDelete);
                 d["hit_rate"] = total > 0 ? static_cast<double>(s.hit) / static_cast<double>(total) : 0.0;
                 d["keys"]["list"] = cache->keys().list();
                 d["keys"]["item_sample"] = cache->keys().item(1);
@@ -315,6 +318,7 @@ int main() {
                 d["ttl"]["detail"] = cache->config().detailTtlSeconds;
                 d["ttl"]["null"] = cache->config().nullTtlSeconds;
                 d["ttl"]["jitter"] = cache->config().jitterSeconds;
+                d["double_delete_ms"] = cache->config().doubleDeleteMs;
                 d["invalidate_on_order"] = invalidateName(cache->config().invalidateOnOrder);
             }
             callback(drogon::HttpResponse::newHttpJsonResponse(root));

@@ -25,7 +25,9 @@
 #include <atomic>
 #include <cstdint>
 #include <functional>
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "CacheKeys.h"
 
@@ -50,6 +52,7 @@ public:
         int detailTtlSeconds = 60;  // 详情：单品，TTL 可以比列表长
         int nullTtlSeconds = 60;    // 空值占位（防穿透 5.6），必须短
         int jitterSeconds = 30;     // TTL 随机抖动上限，防同时失效（雪崩）
+        int doubleDeleteMs = 0;     // 5.4 延迟双删：二次 DEL 的延迟毫秒数，0=关闭（默认）
         InvalidateOnOrder invalidateOnOrder = InvalidateOnOrder::Item;
     };
 
@@ -58,8 +61,8 @@ public:
     // 一个裸的 __nil__ 字符串不可能是合法 JSON，所以用它做哨兵是安全的。
     static constexpr const char *kNullValue = "__nil__";
 
-    SkuCache(drogon::nosql::RedisClientPtr redis, CacheKeys keys, Config cfg)
-        : redis_(std::move(redis)), keys_(std::move(keys)), cfg_(cfg) {}
+    SkuCache(drogon::nosql::RedisClientPtr redis, CacheKeys keys, Config cfg);
+    ~SkuCache();  // 停掉延迟双删的专用线程（若有）
 
     // enabled=false 时所有方法都是空操作，调用方（SeckillService）据此直连 DB。
     bool enabled() const { return cfg_.enabled; }
@@ -96,7 +99,13 @@ public:
     //   且要等 TTL 到期才自愈——这就是最常见的"缓存不一致"来源。
     //   本项目的 DEL 挂在事务 commit 回调里（见 SeckillService::doSeckill），
     //   天然保证了 DB 先落定。
-    //   5.4 会展开：即便顺序对了，并发下仍有一个窄窗口能让旧值回填 → 延迟双删。
+    //
+    // 5.4 延迟双删（doubleDeleteMs > 0 时自动生效）：
+    //   即便顺序对了，并发下仍有一个窄窗口：读请求在 DEL 之前读到旧值、
+    //   在 DEL 之后才把旧值写回缓存。解法是"删两次"——第一次删完，延迟
+    //   doubleDeleteMs 毫秒再删一次，把窗口内回填的旧值也清掉。
+    //   实现是专用延迟删除线程（延时队列），绝不在 IO 线程里 sleep。
+    //   代价：会多删一次"可能已被新值重建"的缓存（多一次 miss），一致性换命中率。
     void invalidate(int64_t skuId);      // 详情 + 列表（ItemAndList）
     void invalidateItem(int64_t skuId);  // 只删详情
     void invalidateList();               // 只删列表
@@ -109,8 +118,9 @@ public:
     struct Stats {
         uint64_t hit = 0;
         uint64_t miss = 0;
-        uint64_t err = 0;   // Redis 异常次数（不区分读写）
-        uint64_t write = 0; // 回写次数（含空值占位）
+        uint64_t err = 0;             // Redis 异常次数（不区分读写）
+        uint64_t write = 0;           // 回写次数（含空值占位）
+        uint64_t delayedDelete = 0;   // 5.4 延迟双删二次删除执行次数（0 = 未开启）
     };
     Stats stats() const;
 
@@ -124,14 +134,23 @@ private:
     void setex(const std::string &key, const std::string &value, int ttlSeconds);
     void del(const std::string &key);
 
+    // 5.4 延迟双删：把 keys 投进专用延迟队列，到点后再次 DEL。
+    void scheduleDelayedDelete(std::vector<std::string> keys);
+
     drogon::nosql::RedisClientPtr redis_;
     CacheKeys keys_;
     Config cfg_;
+
+    // 延迟删除线程（见 .cc）。前向声明 + unique_ptr 是为了把实现藏进 .cc；
+    // 析构先于 redis_（成员按声明逆序析构），线程退出前不会访问已死的客户端。
+    struct DelayDeleter;
+    std::unique_ptr<DelayDeleter> delayDeleter_;
 
     mutable std::atomic<uint64_t> hit_{0};
     mutable std::atomic<uint64_t> miss_{0};
     mutable std::atomic<uint64_t> err_{0};
     mutable std::atomic<uint64_t> write_{0};
+    mutable std::atomic<uint64_t> delayedDelete_{0};  // 5.4 二次删除执行次数（可观测）
 };
 
 }  // namespace seckill::cache
