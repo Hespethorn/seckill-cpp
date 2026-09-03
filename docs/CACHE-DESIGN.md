@@ -353,7 +353,7 @@ WSL 上 HC4 初始化失败 → 0 样本（`.jmx` 里强制 `implementation=Java
 | 构建 | `POST /api/cache/warm {"rebuild_bloom": true}`：一条 SQL 拉全量 id，离线构建后**整体替换指针发布**（无中间态） |
 | 接入点 | `detailSku` 读缓存前：`maybeContains==false` 直接 404，**连 Redis 都不打** |
 | 计数 | `/api/cache/stats` 的 `bloom.rejected`：被布隆直接挡掉的请求数 |
-| 尺寸 | capacity=50 万 / p=0.001 → m≈719 万 bit≈0.9MB，k≈10 |
+| 尺寸 | capacity=50 万 / p=0.001 → m≈719 万 bit≈0.86MB，k≈10 |
 
 **语义要点**：布隆只能判"一定不存在"（false），"可能存在"（true）含误判（此处 ~0.1%，
 代价只是放行一次回源）。**fail-open**：未构建时 maybeContains 恒 true，冷启动不误杀。
