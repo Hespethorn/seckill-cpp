@@ -38,10 +38,22 @@ bool fromJson(const std::string &s, Json::Value &out) {
 
 SeckillService::SeckillService(drogon::orm::DbClientPtr client,
                                std::shared_ptr<InflightGuard> inflight,
-                               std::shared_ptr<seckill::cache::SkuCache> cache)
+                               std::shared_ptr<seckill::cache::SkuCache> cache,
+                               bool bloomEnabled,
+                               std::size_t bloomCapacity,
+                               double bloomErrorRate)
     : db_(std::move(client)),
       inflight_(std::move(inflight)),
-      cache_(std::move(cache)) {}
+      cache_(std::move(cache)),
+      bloomEnabled_(bloomEnabled),
+      bloomCapacity_(bloomCapacity),
+      bloomErrorRate_(bloomErrorRate) {
+    if (bloomEnabled_) {
+        SK_LOG_INFO << "bloom filter enabled: capacity=" << bloomCapacity_
+                    << " errorRate=" << bloomErrorRate_
+                    << " (rebuild via POST /api/cache/warm {\"rebuild_bloom\":true})";
+    }
+}
 
 void SeckillService::doSeckill(
     int64_t userId,
@@ -276,6 +288,15 @@ void SeckillService::detailSku(
 
     // ── 5.3 缓存读路径：Cache-Aside（+ 空值占位防穿透，5.6）──────────────
     if (cache_ && cache_->enabled()) {
+        // ── 5.7 布隆预过滤：集合外 id 直接判不存在 ────────────────────────
+        // 布隆说"一定不存在"的 id，连 Redis 都不打（比空值哨兵更靠前）。
+        // 未启用 / 未构建时 bloomAllows 恒 true（fail-open，不误杀正常流量）。
+        // 注意这里只挡"全集之外"；重建集合 = DB 全量 sku id（warm rebuild_bloom）。
+        if (bloomEnabled_ && !bloomAllows(skuId)) {
+            bloomRejected_.fetch_add(1, std::memory_order_relaxed);
+            cb(false, Json::Value());
+            return;
+        }
         cache_->getDetail(skuId, [cb, this, skuId](bool hit,
                                                    const std::string &value) {
             if (hit) {
@@ -391,4 +412,72 @@ void SeckillService::warmCache(
             }
         },
         limit);
+}
+
+void SeckillService::rebuildBloom(
+    std::function<void(bool, std::size_t)> &&callback) {
+    auto cb = std::move(callback);
+    if (!bloomEnabled_) {
+        // 配置没开：空操作。保持幂等——重复调 rebuild 不报错。
+        cb(true, 0);
+        return;
+    }
+    // 一次 SQL 拉全部 sku id（单列 20 万行，结果集约几 MB，预热低频可接受）。
+    // 构建期是"离线"的：先造新过滤器、add 完、再整体替换 bloom_ 指针发布，
+    // 查询端读到的永远是"完整旧版"或"完整新版"，没有中间态。
+    db_->execSqlAsync(
+        "SELECT id FROM seckill_sku",
+        [cb, this](const drogon::orm::Result &result) {
+            auto fresh =
+                seckill::cache::BloomFilter::create(bloomCapacity_, bloomErrorRate_);
+            for (const auto &row : result) {
+                fresh->add(row["id"].as<int64_t>());
+            }
+            {
+                std::lock_guard<std::mutex> lk(bloomMutex_);
+                bloom_ = std::move(fresh);
+            }
+            SK_LOG_INFO << "BLOOM_REBUILD added=" << bloomStats().added
+                        << " bits=" << bloomStats().bits
+                        << " hashes=" << bloomStats().hashes;
+            cb(true, result.size());
+        },
+        [cb](const std::exception_ptr &eptr) {
+            try {
+                std::rethrow_exception(eptr);
+            } catch (const std::exception &ex) {
+                SK_LOG_ERROR << "BLOOM_REBUILD_FAILED err=" << ex.what();
+                cb(false, 0);
+            }
+        });
+}
+
+bool SeckillService::bloomAllows(int64_t skuId) const {
+    std::shared_ptr<seckill::cache::BloomFilter> cur;
+    {
+        std::lock_guard<std::mutex> lk(bloomMutex_);
+        cur = bloom_;
+    }
+    // 空 = 未构建（fail-open 放行）。BloomFilter::maybeContains 自身对 ready=false
+    // 也返回 true，这里双重保险只为语义清晰。
+    if (!cur || !cur->ready()) return true;
+    return cur->maybeContains(static_cast<uint64_t>(skuId));
+}
+
+SeckillService::BloomStats SeckillService::bloomStats() const {
+    BloomStats s;
+    s.enabled = bloomEnabled_;
+    s.rejected = bloomRejected_.load(std::memory_order_relaxed);
+    std::shared_ptr<seckill::cache::BloomFilter> cur;
+    {
+        std::lock_guard<std::mutex> lk(bloomMutex_);
+        cur = bloom_;
+    }
+    if (cur && cur->ready()) {
+        s.ready = true;
+        s.added = cur->addedCount();
+        s.bits = cur->bitCount();
+        s.hashes = cur->numHashes();
+    }
+    return s;
 }

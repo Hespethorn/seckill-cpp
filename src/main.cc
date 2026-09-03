@@ -151,7 +151,19 @@ AppBundle buildBundle() {
                  << " keyPrefix=" << keys.prefix() << ":" << keys.version();
     }
 
-    b.svc = std::make_shared<SeckillService>(db, b.lock, b.skuCache);
+    // 5.7 布隆过滤器配置：capacity 是预期元素数（必须 ≥ 实际 sku 数，否则误判率
+    // 上升）；error_rate 为允许误判率。默认关——用 POST /api/cache/warm
+    // {"rebuild_bloom":true} 构建后才真正生效（fail-open：未构建时全部放行）。
+    const bool bloomEnabled = cfgBool(c, "bloom_enabled", false);
+    const std::size_t bloomCapacity =
+        static_cast<std::size_t>(cfgInt(c, "bloom_capacity", 500000));
+    const double bloomErrorRate =
+        (c.isMember("bloom_error_rate") && c["bloom_error_rate"].isNumeric())
+            ? c["bloom_error_rate"].asDouble()
+            : 0.001;
+
+    b.svc = std::make_shared<SeckillService>(
+        db, b.lock, b.skuCache, bloomEnabled, bloomCapacity, bloomErrorRate);
     b.seckill = std::make_shared<SeckillController>(b.svc);
 
     if (!redis) return b;
@@ -321,32 +333,57 @@ int main() {
                 d["ttl"]["jitter"] = cache->config().jitterSeconds;
                 d["double_delete_ms"] = cache->config().doubleDeleteMs;
                 d["invalidate_on_order"] = invalidateName(cache->config().invalidateOnOrder);
+                // 5.7 布隆过滤器状态：rejected 是被布隆挡掉的请求数（防穿透的直接度量）
+                const auto bs = bundle().svc->bloomStats();
+                d["bloom"]["enabled"] = bs.enabled;
+                d["bloom"]["ready"] = bs.ready;
+                d["bloom"]["added"] = Json::UInt64(bs.added);
+                d["bloom"]["rejected"] = Json::UInt64(bs.rejected);
+                d["bloom"]["bits"] = Json::UInt64(bs.bits);
+                d["bloom"]["hashes"] = bs.hashes;
             }
             callback(drogon::HttpResponse::newHttpJsonResponse(root));
         },
         {drogon::Get});
 
-    // 5.5 缓存预热：把 DB 里的商品批量搬进缓存。这是运营动作（活动开始前 / 压测
-    // 前执行），不是服务启动时的副作用 —— 启动自预热要回答"预热多少、要不要等它
-    // 完成再收流量"，复杂度不该进服务主链路。body 可选 {"limit": N}，默认 1000。
+    // 5.5 缓存预热 + 5.7 布隆重建：把 DB 里的商品批量搬进缓存。这是运营动作
+    // （活动开始前 / 压测前执行），不是服务启动时的副作用 —— 启动自预热要回答
+    // "预热多少、要不要等它完成再收流量"，复杂度不该进服务主链路。
+    // body 可选 {"limit": N, "rebuild_bloom": true}：默认预热前 1000 个；
+    // rebuild_bloom=true 时先全量重建布隆过滤器（若已启用），再预热。
     drogon::app().registerHandler(
         "/api/cache/warm",
         [](const drogon::HttpRequestPtr &req,
            std::function<void(const drogon::HttpResponsePtr &)> &&callback) {
             int limit = 1000;
+            bool rebuildBloom = false;
             const auto &json = req->getJsonObject();
-            if (json && json->isMember("limit") && (*json)["limit"].isInt()) {
-                limit = (*json)["limit"].asInt();
+            if (json) {
+                if ((*json).isMember("limit") && (*json)["limit"].isInt()) {
+                    limit = (*json)["limit"].asInt();
+                }
+                if ((*json).isMember("rebuild_bloom") &&
+                    (*json)["rebuild_bloom"].isBool()) {
+                    rebuildBloom = (*json)["rebuild_bloom"].asBool();
+                }
             }
-            bundle().svc->warmCache(
-                limit,
-                [callback](bool ok, int warmed) {
-                    Json::Value root;
-                    root["code"] = ok ? 0 : 1;
-                    root["data"]["warmed"] = warmed;
-                    if (!ok) root["msg"] = "warm failed (see server log)";
-                    callback(drogon::HttpResponse::newHttpJsonResponse(root));
-                });
+            if (limit < 1) limit = 1;
+            auto done = [callback](bool ok, int warmed) {
+                Json::Value root;
+                root["code"] = ok ? 0 : 1;
+                root["data"]["warmed"] = warmed;
+                if (!ok) root["msg"] = "warm failed (see server log)";
+                callback(drogon::HttpResponse::newHttpJsonResponse(root));
+            };
+            if (rebuildBloom) {
+                bundle().svc->rebuildBloom(
+                    [svc = bundle().svc, limit, done](bool, std::size_t) {
+                        // 布隆重建完成（无论成败都继续预热，两者相互独立）
+                        svc->warmCache(limit, done);
+                    });
+            } else {
+                bundle().svc->warmCache(limit, done);
+            }
         },
         {drogon::Post});
 

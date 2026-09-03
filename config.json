@@ -55,6 +55,9 @@
       "null_ttl_seconds": 60,
       "jitter_seconds": 30,
       "double_delete_ms": 0,
+      "bloom_enabled": false,
+      "bloom_capacity": 500000,
+      "bloom_error_rate": 0.001,
       "invalidate_on_order": "item"
     }
   },

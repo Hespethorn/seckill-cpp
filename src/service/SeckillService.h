@@ -1,13 +1,16 @@
 #pragma once
 #include <drogon/orm/DbClient.h>
 
+#include <atomic>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
 
 #include <json/json.h>
 
+#include "BloomFilter.h"
 #include "InflightGuard.h"
 #include "SkuCache.h"
 
@@ -33,9 +36,14 @@ class SeckillService {
 public:
     // inflight 传 nullptr 或 Mode::None 即关闭闸门（阶段一压测基线就是这个状态）
     // cache    传 nullptr 或 cache.enabled=false 即直连 DB（5.1 的"接口基线"就是这个状态）
+    // bloom*   5.7 布隆过滤器参数：enabled=false 时 rebuildBloom 为空操作、
+    //          detailSku 不做预过滤（默认关，需 warm 端点 rebuild_bloom 构建后才生效）
     explicit SeckillService(drogon::orm::DbClientPtr client,
                             std::shared_ptr<seckill::InflightGuard> inflight = nullptr,
-                            std::shared_ptr<seckill::cache::SkuCache> cache = nullptr);
+                            std::shared_ptr<seckill::cache::SkuCache> cache = nullptr,
+                            bool bloomEnabled = false,
+                            std::size_t bloomCapacity = 500000,
+                            double bloomErrorRate = 0.001);
 
     // 异步秒杀，回调语义：
     //   (true,  "OK")               下单成功
@@ -70,6 +78,21 @@ public:
     //   回调 (ok, warmed)：warmed 为写回缓存的 sku 数（不含列表缓存本身）。
     void warmCache(int limit, std::function<void(bool, int)> &&callback);
 
+    // 5.7 重建布隆过滤器：一次 SQL 拉全部 sku id，构建新过滤器后整体替换。
+    //   回调 (ok, added)：added 为装入过滤器的元素数（bloom 未启用时为 0）。
+    //   构建期间查询端拿到的仍是旧过滤器（整体替换，无中间态）。
+    void rebuildBloom(std::function<void(bool, std::size_t)> &&callback);
+
+    struct BloomStats {
+        bool enabled = false;
+        bool ready = false;   // 已构建过（warm 的 rebuild_bloom 跑过）
+        std::size_t added = 0;      // 已装入的元素数
+        std::uint64_t rejected = 0; // 被布隆判"一定不存在"直接挡掉的请求数
+        std::size_t bits = 0;
+        int hashes = 0;
+    };
+    BloomStats bloomStats() const;
+
     const std::shared_ptr<seckill::cache::SkuCache> &cache() const { return cache_; }
 
 private:
@@ -80,7 +103,22 @@ private:
                            std::function<void(bool, const Json::Value &)> cb,
                            bool writeCache);
 
+    // 5.7 布隆预过滤：false = 集合外（一定不存在，直接 404，不打 Redis/DB）。
+    // 返回 true 的三种情况：未启用 / 未构建（fail-open）/ 命中或误判（放行）。
+    bool bloomAllows(int64_t skuId) const;
+
     drogon::orm::DbClientPtr db_;
     std::shared_ptr<seckill::InflightGuard> inflight_;
     std::shared_ptr<seckill::cache::SkuCache> cache_;
+
+    // ── 5.7 布隆过滤器状态 ──────────────────────────────────────────────
+    // 读路径（多个 IO 线程）并发调用 bloomAllows，重建只在 warm 时发生。
+    // bloom_ 指针本身用 bloomMutex_ 保护（只在"替换"时刻短暂持锁）；
+    // BloomFilter 内部构建完即不可变，查询无写并发，无需额外锁。
+    bool bloomEnabled_ = false;
+    std::size_t bloomCapacity_ = 500000;
+    double bloomErrorRate_ = 0.001;
+    mutable std::mutex bloomMutex_;
+    std::shared_ptr<seckill::cache::BloomFilter> bloom_;  // 空 = 未构建（放行）
+    mutable std::atomic<std::uint64_t> bloomRejected_{0};
 };
