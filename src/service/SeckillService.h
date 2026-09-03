@@ -60,6 +60,16 @@ public:
     void detailSku(int64_t skuId,
                    std::function<void(bool, const Json::Value &)> &&callback);
 
+    // 5.5 缓存预热：一次 SQL 取前 limit 条 sku，重建列表缓存 + 批量回写详情缓存。
+    //   为什么需要预热：进程刚启动时缓存是空的，洪峰第一波全部 miss 回源 DB，
+    //   缓存不但没挡流量反而给 DB 加压（回写风暴）。预热把"该在缓存里的数据"
+    //   在流量进来之前放进去。真实秒杀里这是**运营动作**（活动开始前执行），
+    //   所以做成 HTTP 端点而不是服务启动时的副作用——启动自预热要回答
+    //   "预热多少、要不要等它完成再收流量"，复杂度不该进服务主链路。
+    //   回写全部 fire-and-forget（setex 幂等，重复预热无副作用）。
+    //   回调 (ok, warmed)：warmed 为写回缓存的 sku 数（不含列表缓存本身）。
+    void warmCache(int limit, std::function<void(bool, int)> &&callback);
+
     const std::shared_ptr<seckill::cache::SkuCache> &cache() const { return cache_; }
 
 private:

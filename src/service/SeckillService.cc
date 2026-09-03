@@ -340,3 +340,55 @@ void SeckillService::queryDetailFromDb(
         },
         skuId);
 }
+
+void SeckillService::warmCache(
+    int limit, std::function<void(bool, int)> &&callback) {
+    // 预热是"把 DB 里的商品搬进缓存"，缓存关着时没有意义，但不算故障：
+    // 上层（运营脚本）在 cache.enabled=false 的压测轮里不该因为调了预热就报错。
+    // 这里照常查库并回写 —— SkuCache::setex 内部对 !enabled 直接忽略。
+    auto cb = std::move(callback);
+    if (limit < 1) limit = 1;  // 防御：端点已校验，这里兜底
+    db_->execSqlAsync(
+        "SELECT id, name, stock, total, "
+        "DATE_FORMAT(start_time, '%Y-%m-%d %H:%i:%s') AS start_time, "
+        "DATE_FORMAT(end_time, '%Y-%m-%d %H:%i:%s') AS end_time "
+        "FROM seckill_sku ORDER BY id ASC LIMIT ?",
+        [cb, this, limit](const drogon::orm::Result &result) {
+            // 一次 SQL 两用：前 100 条组装成列表缓存（与 listSkus 的 LIMIT 100 对齐，
+            // 避免列表缓存被预热成与真实读路径不一致的行数）；每一行同时回写详情缓存。
+            Json::Value listArr(Json::arrayValue);
+            int warmed = 0;
+            for (const auto &row : result) {
+                Json::Value item;
+                item["id"] = row["id"].as<int64_t>();
+                item["name"] = row["name"].as<std::string>();
+                item["stock"] = row["stock"].as<int>();
+                item["total"] = row["total"].as<int>();
+                item["startTime"] = row["start_time"].as<std::string>();
+                item["endTime"] = row["end_time"].as<std::string>();
+                if (listArr.size() < 100) listArr.append(item);
+                if (cache_) {
+                    const int64_t id = item["id"].asInt64();
+                    cache_->setDetail(id, toCompactJson(item));
+                    ++warmed;
+                }
+            }
+            if (cache_ && !listArr.empty()) {
+                // 列表缓存由读路径重建也行，但预热时一次写好，省得压测冷启动多打一次回源
+                cache_->setList(toCompactJson(listArr));
+            }
+            SK_LOG_INFO << "CACHE_WARM limit=" << limit
+                        << " warmed=" << warmed
+                        << " cacheEnabled=" << (cache_ && cache_->enabled());
+            cb(true, warmed);
+        },
+        [cb](const std::exception_ptr &eptr) {
+            try {
+                std::rethrow_exception(eptr);
+            } catch (const std::exception &ex) {
+                SK_LOG_ERROR << "WARM_FAILED err=" << ex.what();
+                cb(false, 0);
+            }
+        },
+        limit);
+}

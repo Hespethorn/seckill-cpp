@@ -39,6 +39,7 @@ namespace {
 struct AppBundle {
     std::shared_ptr<InflightGuard> lock;
     std::shared_ptr<seckill::cache::SkuCache> skuCache;  // Redis 不可用时为 nullptr
+    std::shared_ptr<SeckillService> svc;                 // 5.5 预热端点等直接调服务层
     std::shared_ptr<SeckillController> seckill;
     std::shared_ptr<UserController> user;  // Redis 不可用时为 nullptr
     std::shared_ptr<SmsController> sms;    // 同上
@@ -150,8 +151,8 @@ AppBundle buildBundle() {
                  << " keyPrefix=" << keys.prefix() << ":" << keys.version();
     }
 
-    b.seckill = std::make_shared<SeckillController>(
-        std::make_shared<SeckillService>(db, b.lock, b.skuCache));
+    b.svc = std::make_shared<SeckillService>(db, b.lock, b.skuCache);
+    b.seckill = std::make_shared<SeckillController>(b.svc);
 
     if (!redis) return b;
 
@@ -324,6 +325,30 @@ int main() {
             callback(drogon::HttpResponse::newHttpJsonResponse(root));
         },
         {drogon::Get});
+
+    // 5.5 缓存预热：把 DB 里的商品批量搬进缓存。这是运营动作（活动开始前 / 压测
+    // 前执行），不是服务启动时的副作用 —— 启动自预热要回答"预热多少、要不要等它
+    // 完成再收流量"，复杂度不该进服务主链路。body 可选 {"limit": N}，默认 1000。
+    drogon::app().registerHandler(
+        "/api/cache/warm",
+        [](const drogon::HttpRequestPtr &req,
+           std::function<void(const drogon::HttpResponsePtr &)> &&callback) {
+            int limit = 1000;
+            const auto &json = req->getJsonObject();
+            if (json && json->isMember("limit") && (*json)["limit"].isInt()) {
+                limit = (*json)["limit"].asInt();
+            }
+            bundle().svc->warmCache(
+                limit,
+                [callback](bool ok, int warmed) {
+                    Json::Value root;
+                    root["code"] = ok ? 0 : 1;
+                    root["data"]["warmed"] = warmed;
+                    if (!ok) root["msg"] = "warm failed (see server log)";
+                    callback(drogon::HttpResponse::newHttpJsonResponse(root));
+                });
+        },
+        {drogon::Post});
 
     drogon::app().registerHandler(
         "/api/user/register",
