@@ -10,7 +10,7 @@
 - **阶段一已落地**（`v0.1.x`）：Drogon + MySQL 直连，原子 `UPDATE ... WHERE stock>0` 防超卖，事务化幂等下单（`uk_user_sku` 唯一键兜底）。
 - **自实现登录鉴权**：PBKDF2 加盐哈希、自写 JWT（HS256）、Drogon 内置 Redis 异步客户端可吊销会话——零引入 `redis-plus-plus` / `jwt-cpp` 等同步或需 FetchContent 的依赖。
 - **短信验证码（自签发 / 日志模式）**：6 位码 CSPRNG 生成 + Redis 存储 + Lua 原子校验、发送限流、登录失败锁定，不接任何短信网关。
-- **同 IP 注册频控**：固定窗口内限制成功注册数（默认 5 次 / 小时），封堵自签发验证码模式下的批量刷号——没有它，不接短信网关的注册接口在真实部署下扛不住批量注册。
+- **IP 预防（双保险）**：① **同 IP 注册频控**（`service/RegisterGuard.*`）——固定窗口内限制**成功注册数**（默认 5 次 / 小时），Lua 原子 `INCR + 首次 EXPIRE`，Redis 挂时 fail-open 放行，超限返回 HTTP 429；堵住自签发验证码模式下"同 IP 批量注册刷号"。② **反代取真实客户端 IP**（`UserController::clientIp()`）——手动解析 `X-Forwarded-For` 首段，因为 **Drogon 1.9.10 没有 `getClientIp()`**，走反代时不能信 `getPeerAddr()`（那是代理 IP），空则回退 TCP 对端地址。
 - **应用层在途闸门**（`service/InflightGuard.h`，mutex / 自旋 / 原子三后端）挡掉并发窗口内的重复下单，DB 压力降约 75%。
 - **实测基线**：官方 JMeter 压测 **QPS≈371 / p95≈359ms / 0 超卖**，curl harness 交叉验证 ≈341。
 
@@ -44,14 +44,18 @@ bash scripts/build-wsl.sh
 | --- | --- | --- | --- |
 | GET | `/api/health` | 健康检查 | — |
 | POST | `/api/seckill` | 秒杀下单（`userId` 走 body，暂不校验 token） | MySQL |
+| GET | `/api/seckill/list` | 商品列表（Redis 缓存，TTL 30s + 抖动） | MySQL + Redis |
+| GET | `/api/seckill/{skuId}` | 商品详情（Redis 缓存，含空值哨兵防穿透） | MySQL + Redis |
 | GET | `/api/lock/stats` | 4.8 在途闸门统计 | — |
+| GET | `/api/cache/stats` | 5.1 缓存命中率 / 回源次数 / 实际 key 与 TTL | Redis |
 | POST | `/api/sms/send` | 发送短信验证码 | Redis |
 | POST | `/api/user/register` | 注册（默认需验证码） | MySQL + Redis |
 | POST | `/api/user/login` | 登录，返回 Bearer Token | MySQL + Redis |
 | POST | `/api/user/logout` | 登出，吊销会话 | Redis |
 
-> Redis 没起时，登录 / 短信相关路由返回 `503`，**秒杀主链路不受影响**。
+> Redis 没起时，登录 / 短信相关路由返回 `503`，**秒杀主链路不受影响**（缓存自动降级为直连 MySQL）。
 > 完整请求/响应示例、错误码、配置项、Redis key 约定 → **[`docs/PLAN.md` §7](docs/PLAN.md)**。
+> 缓存层专项规格（Key 规范 / TTL 与抖动 / 失效范围取舍 / 压测方法）→ **[`docs/CACHE-DESIGN.md`](docs/CACHE-DESIGN.md)**。
 
 ## 项目结构
 
@@ -67,13 +71,15 @@ seckill-cpp/
 │   │   ├── UserController.*      # /api/user/{register,login,logout}
 │   │   └── SmsController.*       # /api/sms/send
 │   ├── service/
-│   │   ├── SeckillService.*      # 事务化原子扣减（阶段一核心）
+│   │   ├── SeckillService.*      # 事务化原子扣减（阶段一核心）+ 5.2/5.3 读缓存路径
+│   │   ├── CacheKeys.h           # 5.1 缓存 Key 唯一构造入口（seckill:sku:v1:...）
+│   │   ├── SkuCache.*            # 5.1 商品缓存：异步 GET/SETEX/DEL + 空值哨兵 + 命中统计（fail-open）
 │   │   ├── InflightGuard.h       # 4.8 应用层在途闸门（mutex / 自旋 / 原子三后端）
 │   │   ├── password.*            # PBKDF2-HMAC-SHA256 + CSPRNG salt + 常量时间比较
 │   │   ├── Jwt.*                 # 自实现 HS256 签发/校验
 │   │   ├── SessionStore.*        # Redis 可吊销会话 sess:{jti}
 │   │   ├── LoginGuard.*          # 3.6 错误次数 + 账号锁定（Lua 原子）
-│   │   ├── RegisterGuard.*       # 同 IP 注册频控（固定窗口 + Lua 原子，fail-open）
+│   │   ├── RegisterGuard.*       # 同 IP 注册频控（固定窗口 + Lua 原子，fail-open，429；Redis key reg:ip:<ip>）
 │   │   ├── SmsSender.*           # 验证码送达：自签发 / 日志模式（不接短信网关）
 │   │   ├── SmsService.*          # 验证码生成/限流/原子校验
 │   │   └── UserService.*         # 注册 / 登录 / 登出 / 鉴权

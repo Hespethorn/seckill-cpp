@@ -51,6 +51,10 @@ echo
 echo "==> 清理该手机号的残留数据"
 redis-cli DEL "sms:code:$PHONE" "sms:cd:$PHONE" "sms:try:$PHONE" \
               "login:fail:$PHONE" "login:lock:$PHONE" >/dev/null 2>&1
+# 清同 IP 注册频控计数：本脚本从 127.0.0.1 跑，RegisterGuard 记的是 reg:ip:127.0.0.1。
+# 不删它，反复跑会在 5/小时配额耗尽后，把第 4 步"重复注册"误伤成 REGISTER_IP_LIMITED
+# （闸门在查重之前，属正确安全设计；这里只是让测试不消耗自己配额）。
+redis-cli DEL "reg:ip:127.0.0.1" >/dev/null 2>&1
 mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill \
     -e "DELETE FROM user WHERE phone='$PHONE';" 2>/dev/null
 echo "  已清理"
@@ -158,7 +162,7 @@ fi
 echo
 echo "==> 清理测试数据"
 redis-cli DEL "sms:code:$PHONE" "sms:cd:$PHONE" "sms:try:$PHONE" \
-              "login:fail:$PHONE" "login:lock:$PHONE" >/dev/null 2>&1
+              "login:fail:$PHONE" "login:lock:$PHONE" "reg:ip:127.0.0.1" >/dev/null 2>&1
 mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill \
     -e "DELETE FROM user WHERE phone='$PHONE';" 2>/dev/null
 echo "  已清理"
