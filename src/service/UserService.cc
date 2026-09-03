@@ -49,107 +49,127 @@ UserService::UserService(drogon::orm::DbClientPtr db,
                          std::shared_ptr<SessionStore> sessions,
                          std::shared_ptr<Jwt> jwt,
                          std::shared_ptr<LoginGuard> guard,
+                         std::shared_ptr<RegisterGuard> registerGuard,
                          std::shared_ptr<SmsService> sms,
                          Config cfg)
     : db_(std::move(db)),
       sessions_(std::move(sessions)),
       jwt_(std::move(jwt)),
       guard_(std::move(guard)),
+      registerGuard_(std::move(registerGuard)),
       sms_(std::move(sms)),
       cfg_(cfg) {}
 
 void UserService::registerUser(const std::string &phone,
                                const std::string &password,
                                const std::string &code,
+                               const std::string &ip,
                                std::function<void(bool, const std::string &)> &&cb) {
-    if (!SmsService::isValidPhone(phone)) {
-        cb(false, "INVALID_PHONE");
-        return;
-    }
-    if (static_cast<int>(password.size()) < cfg_.minPasswordLength) {
-        cb(false, "WEAK_PASSWORD");
-        return;
-    }
+    // 同 IP 注册频控闸门：固定窗口内只允许有限个成功注册。
+    // 放在最前面——被限的 IP 连手机号格式校验都不该再消耗后续资源。
+    // IP 来自控制器（手动解析 X-Forwarded-For 首段，无则取 TCP 对端地址）。
+    registerGuard_->check(ip,
+        [this, phone, password, code, ip, cb = std::move(cb)](bool allowed) mutable {
+            if (!allowed) {
+                SK_LOG_WARN << "REGISTER_IP_LIMITED ip=" << ip;
+                cb(false, "REGISTER_IP_LIMITED");
+                return;
+            }
 
-    // 查重 → 加盐哈希 → 落库，整体抽成一个可延迟执行的闭包：
-    // 前面可能要先过一道验证码校验，闭包让"先校验再注册"的时序写起来是直的。
-    std::function<void()> doRegister = [this, phone, password, cb]() {
-        // 1) 应用层查重（快路径）。真正的兜底是 uk_phone 唯一索引——
-        //    两个同手机号请求若在这里竞态都查不到，第二个 INSERT 会撞唯一键。
-        //    注意：Drogon 对空结果集走的是成功回调（size()==0），不是异常回调。
-        db_->execSqlAsync(
-            "SELECT id FROM user WHERE phone = ?",
-            [this, phone, password, cb](const drogon::orm::Result &r) {
-                if (r.size() > 0) {
-                    cb(false, "PHONE_REGISTERED");
-                    return;
-                }
-                const std::string salt = genSalt();
-                if (salt.empty()) {
-                    SK_LOG_ERROR << "REG_SALT_FAILED phone=" << phone;
-                    cb(false, "HASH_FAILED");
-                    return;
-                }
-                asyncHashPassword(password, salt,
-                    [this, phone, salt, cb](std::string hash) {
-                        if (hash.empty()) {
-                            SK_LOG_ERROR << "REG_HASH_FAILED phone=" << phone;
+            if (!SmsService::isValidPhone(phone)) {
+                cb(false, "INVALID_PHONE");
+                return;
+            }
+            if (static_cast<int>(password.size()) < cfg_.minPasswordLength) {
+                cb(false, "WEAK_PASSWORD");
+                return;
+            }
+
+            // 查重 → 加盐哈希 → 落库，整体抽成一个可延迟执行的闭包：
+            // 前面可能要先过一道验证码校验，闭包让"先校验再注册"的时序写起来是直的。
+            // ip 一并捕获，注册成功时交给 RegisterGuard 计一次数。
+            std::function<void()> doRegister = [this, phone, password, ip, cb]() {
+                // 1) 应用层查重（快路径）。真正的兜底是 uk_phone 唯一索引——
+                //    两个同手机号请求若在这里竞态都查不到，第二个 INSERT 会撞唯一键。
+                //    注意：Drogon 对空结果集走的是成功回调（size()==0），不是异常回调。
+                db_->execSqlAsync(
+                    "SELECT id FROM user WHERE phone = ?",
+                    [this, phone, password, ip, cb](const drogon::orm::Result &r) {
+                        if (r.size() > 0) {
+                            cb(false, "PHONE_REGISTERED");
+                            return;
+                        }
+                        const std::string salt = genSalt();
+                        if (salt.empty()) {
+                            SK_LOG_ERROR << "REG_SALT_FAILED phone=" << phone;
                             cb(false, "HASH_FAILED");
                             return;
                         }
-                        db_->execSqlAsync(
-                            "INSERT INTO user (phone, password_hash, salt, status, "
-                            "create_time) VALUES (?, ?, ?, 1, NOW())",
-                            [cb, phone](const drogon::orm::Result &) {
-                                SK_LOG_INFO << "REGISTER_OK phone=" << phone;
-                                cb(true, "OK");
-                            },
-                            [cb, phone](const std::exception_ptr &eptr) {
-                                const std::string err = describe(eptr);
-                                // 唯一键冲突不是系统故障，是"并发下被抢先注册了"，
-                                // 必须映射成业务拒绝码，否则客户端会当成 500 去重试。
-                                if (isDuplicateEntry(err)) {
-                                    cb(false, "PHONE_REGISTERED");
+                        asyncHashPassword(password, salt,
+                            [this, phone, salt, ip, cb](std::string hash) {
+                                if (hash.empty()) {
+                                    SK_LOG_ERROR << "REG_HASH_FAILED phone=" << phone;
+                                    cb(false, "HASH_FAILED");
                                     return;
                                 }
-                                SK_LOG_ERROR << "REGISTER_FAILED phone=" << phone
-                                             << " err=" << err;
-                                cb(false, "DB_ERROR:" + err);
-                            },
-                            phone, hash, salt);
-                    });
-            },
-            [cb, phone](const std::exception_ptr &eptr) {
-                SK_LOG_ERROR << "REGISTER_QUERY_FAILED phone=" << phone
-                             << " err=" << describe(eptr);
-                cb(false, "DB_ERROR:" + describe(eptr));
-            },
-            phone);
-    };
+                                db_->execSqlAsync(
+                                    "INSERT INTO user (phone, password_hash, salt, status, "
+                                    "create_time) VALUES (?, ?, ?, 1, NOW())",
+                                    [cb, phone, ip, this](const drogon::orm::Result &) {
+                                        SK_LOG_INFO << "REGISTER_OK phone=" << phone;
+                                        // 注册成功：同 IP 窗口计数 +1（固定窗口 TTL 在
+                                        // RegisterGuard 里首次自动设置）。失败什么都不做，
+                                        // 因为此时已无新账号产生。
+                                        registerGuard_->markSuccess(ip);
+                                        cb(true, "OK");
+                                    },
+                                    [cb, phone](const std::exception_ptr &eptr) {
+                                        const std::string err = describe(eptr);
+                                        // 唯一键冲突不是系统故障，是"并发下被抢先注册了"，
+                                        // 必须映射成业务拒绝码，否则客户端会当成 500 去重试。
+                                        if (isDuplicateEntry(err)) {
+                                            cb(false, "PHONE_REGISTERED");
+                                            return;
+                                        }
+                                        SK_LOG_ERROR << "REGISTER_FAILED phone=" << phone
+                                                     << " err=" << err;
+                                        cb(false, "DB_ERROR:" + err);
+                                    },
+                                    phone, hash, salt);
+                            });
+                    },
+                    [cb, phone](const std::exception_ptr &eptr) {
+                        SK_LOG_ERROR << "REGISTER_QUERY_FAILED phone=" << phone
+                                     << " err=" << describe(eptr);
+                        cb(false, "DB_ERROR:" + describe(eptr));
+                    },
+                    phone);
+            };
 
-    if (!cfg_.requireSmsOnRegister) {
-        doRegister();
-        return;
-    }
-    sms_->verifyCode(phone, code,
-        [cb, doRegister](SmsService::VerifyResult r) {
-            switch (r) {
-                case SmsService::VerifyResult::Ok:
-                    doRegister();
-                    return;
-                case SmsService::VerifyResult::EmptyCode:
-                    cb(false, "CODE_EXPIRED");
-                    return;
-                case SmsService::VerifyResult::WrongCode:
-                    cb(false, "CODE_WRONG");
-                    return;
-                case SmsService::VerifyResult::TooManyAttempts:
-                    cb(false, "CODE_TOO_MANY_ATTEMPTS");
-                    return;
-                default:
-                    cb(false, "CODE_INVALID");
-                    return;
+            if (!cfg_.requireSmsOnRegister) {
+                doRegister();
+                return;
             }
+            sms_->verifyCode(phone, code,
+                [cb, doRegister](SmsService::VerifyResult r) {
+                    switch (r) {
+                        case SmsService::VerifyResult::Ok:
+                            doRegister();
+                            return;
+                        case SmsService::VerifyResult::EmptyCode:
+                            cb(false, "CODE_EXPIRED");
+                            return;
+                        case SmsService::VerifyResult::WrongCode:
+                            cb(false, "CODE_WRONG");
+                            return;
+                        case SmsService::VerifyResult::TooManyAttempts:
+                            cb(false, "CODE_TOO_MANY_ATTEMPTS");
+                            return;
+                        default:
+                            cb(false, "CODE_INVALID");
+                            return;
+                    }
+                });
         });
 }
 

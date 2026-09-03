@@ -10,6 +10,7 @@
 - **阶段一已落地**（`v0.1.x`）：Drogon + MySQL 直连，原子 `UPDATE ... WHERE stock>0` 防超卖，事务化幂等下单（`uk_user_sku` 唯一键兜底）。
 - **自实现登录鉴权**：PBKDF2 加盐哈希、自写 JWT（HS256）、Drogon 内置 Redis 异步客户端可吊销会话——零引入 `redis-plus-plus` / `jwt-cpp` 等同步或需 FetchContent 的依赖。
 - **短信验证码（自签发 / 日志模式）**：6 位码 CSPRNG 生成 + Redis 存储 + Lua 原子校验、发送限流、登录失败锁定，不接任何短信网关。
+- **同 IP 注册频控**：固定窗口内限制成功注册数（默认 5 次 / 小时），封堵自签发验证码模式下的批量刷号——没有它，不接短信网关的注册接口在真实部署下扛不住批量注册。
 - **应用层在途闸门**（`service/InflightGuard.h`，mutex / 自旋 / 原子三后端）挡掉并发窗口内的重复下单，DB 压力降约 75%。
 - **实测基线**：官方 JMeter 压测 **QPS≈371 / p95≈359ms / 0 超卖**，curl harness 交叉验证 ≈341。
 
@@ -72,6 +73,7 @@ seckill-cpp/
 │   │   ├── Jwt.*                 # 自实现 HS256 签发/校验
 │   │   ├── SessionStore.*        # Redis 可吊销会话 sess:{jti}
 │   │   ├── LoginGuard.*          # 3.6 错误次数 + 账号锁定（Lua 原子）
+│   │   ├── RegisterGuard.*       # 同 IP 注册频控（固定窗口 + Lua 原子，fail-open）
 │   │   ├── SmsSender.*           # 验证码送达：自签发 / 日志模式（不接短信网关）
 │   │   ├── SmsService.*          # 验证码生成/限流/原子校验
 │   │   └── UserService.*         # 注册 / 登录 / 登出 / 鉴权

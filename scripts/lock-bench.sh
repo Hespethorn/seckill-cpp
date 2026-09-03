@@ -19,6 +19,8 @@ DUP="${3:-4}"
 BASE="http://127.0.0.1:8080"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
+# 服务器日志落到固定文件、不随 $TMP 一起被删，方便排查"启动即退"的原因
+SRV_LOG="$ROOT/lock-bench-server.log"
 
 MODES=(none mutex spin atomic)
 TMP="$(mktemp -d)"
@@ -28,7 +30,6 @@ TMP="$(mktemp -d)"
 ORIG_MODE=$(grep -o '"mode": "[a-z]*"' config.json | head -1 |
             sed 's/.*"mode": "\(.*\)"/\1/')
 trap 'rm -rf "$TMP"; stop_server; set_mode "${ORIG_MODE:-none}"' EXIT
-SRV_PID=""
 
 my() { mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill -e "$1" 2>/dev/null; }
 
@@ -48,26 +49,39 @@ echo "  可执行文件和 MySQL 就绪，原始锁模式=$ORIG_MODE"
 echo
 
 stop_server() {
-    [[ -n "$SRV_PID" ]] && kill "$SRV_PID" 2>/dev/null
-    [[ -n "$SRV_PID" ]] && wait "$SRV_PID" 2>/dev/null
-    SRV_PID=""
+    # 按进程名精准杀（不依赖 PID 记账，跨进程组/会话都有效，-9 立刻释放 8080）。
+    pkill -9 -f 'seckill-cpp' 2>/dev/null || true
 }
 
 start_server() {
     stop_server
     # 杀掉任何残留的 seckill-cpp（含手动起的）：否则新进程 bind 8080 失败，
     # 压测会打到旧进程，锁模式不切换，应用层挡掉恒为 0。
-    pkill -f 'seckill-cpp' 2>/dev/null || true
-    sleep 1
-    ./build/src/seckill-cpp > "$TMP/server.log" 2>&1 &
-    SRV_PID=$!
+    pkill -9 -f 'seckill-cpp' 2>/dev/null || true
+    # 等 8080 真正空闲（监听消失）再起新进程，避免 bind 竞态。
+    # 用 /dev/tcp 探活比 /api/health 更准：Drogon 优雅关闭期间 health 可能仍响应，
+    # 但监听端口会先关；连不上即空闲。比"等 health 失败"更快、不会像卡死。
+    for _ in $(seq 1 50); do
+        if (exec 3<>/dev/tcp/127.0.0.1/8080) 2>/dev/null; then
+            sleep 0.2
+        else
+            break
+        fi
+    done
+    # B 版：不起 setsid，服务与脚本同属一个前台进程组。运行期按 Ctrl-C，
+    # SIGINT 同时打到脚本和 seckill-cpp，两者一起退出 —— 即"优雅中止 + 零孤儿"。
+    # 控制仍不依赖 PID：pkill 按名杀、/api/health 探活，跨进程组都可靠。
+    ./build/src/seckill-cpp > "$SRV_LOG" 2>&1 < /dev/null &
+    # disown：把服务从脚本的作业表摘掉，stop_server 用 pkill 杀它时 bash 不再回显
+    # "line N: pid Killed ..." 这种作业死亡通知；服务仍在同进程组，Ctrl-C 不受影响。
+    disown 2>/dev/null || true
     for _ in $(seq 1 60); do
         if curl -s -o /dev/null "$BASE/api/health" 2>/dev/null; then
             return 0
         fi
         sleep 0.2
     done
-    echo "  [ERROR] 服务起不来，日志尾部：" && tail -5 "$TMP/server.log"
+    echo "  [ERROR] 服务起不来（或启动即退），日志尾部：" && tail -25 "$SRV_LOG"
     return 1
 }
 
@@ -147,12 +161,20 @@ for mode in "${MODES[@]}"; do
     if [[ "$actual" != "$mode" ]]; then
         echo "  [WARN] 期望模式 $mode，服务端实际为 ${actual:-unknown}"
         echo "           config.json 当前 mode: $(grep -o '\"mode\": \"[a-z]*\"' config.json | head -1)"
-        echo "           server.log 尾部:"; tail -3 "$TMP/server.log"
+        echo "           server.log 尾部:"; tail -3 "$SRV_LOG"
     fi
 
     for scene in unique dup; do
         reset_data
         read -r start end n ok d409 other < <(run_burst "$scene")
+        # 一轮打完后确认服务还活着：用 /api/health 探活（不依赖 PID），
+        # 若中途崩溃（如某锁后端在并发下出问题）立刻把日志甩出来，
+        # 而不是静默地把后续请求打到死进程上。
+        if ! curl -s -o /dev/null "$BASE/api/health" 2>/dev/null; then
+            echo "  [ERROR] 压测途中 seckill-cpp 崩溃/退出，日志尾部："
+            tail -25 "$SRV_LOG"
+            break 2
+        fi
         elapsed=$(awk -v a="$start" -v b="$end" 'BEGIN {d=b-a; print (d>0?d:0.001)}')
         qps=$(awk -v n="$n" -v t="$elapsed" 'BEGIN {printf "%.1f", n/t}')
 

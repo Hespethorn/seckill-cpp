@@ -15,8 +15,10 @@ CONCURRENCY="${1:-100}"
 STOCK="${2:-10}"
 SKU_ID="${3:-1}"
 BASE_URL="${BASE_URL:-http://127.0.0.1:8080}"
-# mysql 命令行传密码会打 "Using a password" 警告到 stderr, 统一丢弃
-MYSQL=(mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill 2>/dev/null)
+# mysql 命令行传密码会打 "Using a password" 警告到 stderr, 统一丢弃。
+# 注意: 不能写成 MYSQL=(... 2>/dev/null) 数组——Bash 会把数组里的 2> 当普通
+# token 而报 syntax error near unexpected token '2'。用函数在每个调用点丢 stderr。
+MYSQL() { mysql -h127.0.0.1 -P3306 -useckill -pseckill seckill 2>/dev/null "$@"; }
 
 echo "==> [1/4] 检查服务健康..."
 if curl -sf "${BASE_URL}/api/health" >/dev/null; then
@@ -27,9 +29,9 @@ else
 fi
 
 echo "==> [2/4] 重置库存到 ${STOCK} 件, 清空订单..."
-"${MYSQL[@]}" -e "UPDATE seckill_sku SET stock=${STOCK}, total=${STOCK} WHERE id=${SKU_ID}; DELETE FROM seckill_order;"
+MYSQL -e "UPDATE seckill_sku SET stock=${STOCK}, total=${STOCK} WHERE id=${SKU_ID}; DELETE FROM seckill_order;"
 echo "    当前:"
-"${MYSQL[@]}" -e "SELECT id, name, stock, total FROM seckill_sku WHERE id=${SKU_ID};"
+MYSQL -e "SELECT id, name, stock, total FROM seckill_sku WHERE id=${SKU_ID};"
 
 echo "==> [3/4] ${CONCURRENCY} 个用户并发抢购 (每人一个 userId)..."
 TMP=$(mktemp -d)
@@ -65,8 +67,8 @@ done
 echo "    成功=${OK}  售罄=${SOLD}  重复=${DUP}  异常=${ERR}"
 
 echo "==> [4/4] MySQL 验证不超卖..."
-STOCK_LEFT=$("${MYSQL[@]}" -N -e "SELECT stock FROM seckill_sku WHERE id=${SKU_ID};" 2>/dev/null)
-ORDER_CNT=$("${MYSQL[@]}" -N -e "SELECT COUNT(*) FROM seckill_order;" 2>/dev/null)
+STOCK_LEFT=$(MYSQL -N -e "SELECT stock FROM seckill_sku WHERE id=${SKU_ID};" 2>/dev/null)
+ORDER_CNT=$(MYSQL -N -e "SELECT COUNT(*) FROM seckill_order;" 2>/dev/null)
 SOLD_CNT=$((STOCK - STOCK_LEFT))
 echo "    初始库存=${STOCK}  剩余=${STOCK_LEFT}  卖出=${SOLD_CNT}  订单数=${ORDER_CNT}"
 

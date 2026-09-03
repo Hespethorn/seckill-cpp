@@ -9,6 +9,7 @@ add_executable(seckill-cpp
     service/Jwt.cc
     service/SessionStore.cc
     service/LoginGuard.cc
+    service/RegisterGuard.cc
     service/SmsSender.cc
     service/SmsService.cc
     service/UserService.cc

@@ -22,3 +22,6 @@ apache-jmeter-*.tgz.sha512
 # 编辑器/工具
 .*/
 *.swp
+
+# lock-bench 持久化服务器日志（排查启动即退用，跑完不删）
+/lock-bench-server.log

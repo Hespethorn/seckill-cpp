@@ -32,6 +32,10 @@
       "max_fail": 5,
       "lock_seconds": 600
     },
+    "register_limit": {
+      "max_per_ip": 5,
+      "window_seconds": 3600
+    },
     "auth": {
       "require_sms_on_register": true,
       "require_sms_on_login": false,

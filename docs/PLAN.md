@@ -147,6 +147,7 @@
 | ADR-3 | 4.8 应用层锁该锁在哪（在途标记） | 2026-09-02 | `050c3c5`（落地）/ `4b728ca`（实测） |
 | ADR-4 | 前端延后到阶段四之后 | 2026-09-02 | 老周拍板，记录于文档重构 |
 | ADR-5 | Drogon 1.9.x 回调式 vs 协程 | 2026-08-28 | `897262e` / `3aa3b31` / `589cb5e` |
+| ADR-6 | 同 IP 注册频控（自签发模式下的批量注册防护） | 2026-09-02 | 代码落地于本次会话（新增 `service/RegisterGuard.*`） |
 
 > 决策日志索引：每条 ADR 的"拍板日 + 落地 commit"见上表；下方各节附详细论证。
 
@@ -228,6 +229,25 @@ Drogon 的 IO 线程上只允许非阻塞操作，下面这处是同步阻塞的
 通过 `>> [](const ResultSet&, const std::exception_ptr&)` 组合回调处理结果与异常。
 若使用开启 C++20 协程的新版 Drogon，`commit()` 会返回 `drogon::Task<bool>`，需 `co_await` 才生效；
 届时把 `SeckillService.cc` 里的提交改写为协程版本即可（在对应阶段文章里展开）。
+
+### ADR-6 同 IP 注册频控（自签发模式下的批量注册防护）
+
+> 决策日：2026-09-02 ｜ 落地提交：代码落地于本次会话（新增 `service/RegisterGuard.*`，接入 `UserService::registerUser` 闸门）
+
+**背景**：验证码改自签发 / 日志模式后（ADR-1 第三行），"送达"不再是外部约束。但这带来一个真实部署必须面对的问题——攻击者可以用一堆手机号从同一 IP 批量注册。没有频控，自签发模式在真实部署下扛不住批量注册。
+
+**决策**：加一层"同 IP 固定窗口内允许的成功注册数"频控（`RegisterGuard`）。
+
+- 计数**成功注册数**（不是尝试数）：约束的是"一个 IP 能建几个账号"。计尝试数会被错误验证码刷爆配额（DoS 掉正常用户名额），与本意相悖。
+- 固定窗口 `INCR + 首次 EXPIRE`（Lua 原子），Redis 存共享计数——多实例部署语义不变（与 `LoginGuard` 同理）。
+- **fail-open**：Redis 不可用时放行，频控属可用性维度，宁可放过不可误杀正常注册（对比鉴权 `SessionStore::exists` 的 fail-close）。
+- 闸门放在 `registerUser` **最前面**，连手机号格式校验前先拦；IP 来自 `req->getClientIp()`（真实部署走代理时取 X-Forwarded-For，需在 Drogon 配 `trusted_proxies`），空则回退 `getPeerAddr().toIp()`。
+- 阈值默认 `max_per_ip=5` / `window_seconds=3600`，走 `config.json` 的 `register_limit`，随业务可调。
+- 拒绝码 `REGISTER_IP_LIMITED` → HTTP 429。
+
+**效果**：自签发验证码模式 + 同 IP 注册频控，二者结合即可在真实部署下站住脚——既不用接短信网关，又能堵住批量刷号。
+
+---
 
 ### 阶段一的功能抉择（重点）
 

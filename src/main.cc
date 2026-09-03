@@ -13,6 +13,7 @@
 #include "service/InflightGuard.h"
 #include "service/Jwt.h"
 #include "service/LoginGuard.h"
+#include "service/RegisterGuard.h"
 #include "service/SeckillService.h"
 #include "service/SessionStore.h"
 #include "service/SmsSender.h"
@@ -115,6 +116,11 @@ AppBundle buildBundle() {
                                               cfgInt(guardCfg, "max_fail", 5),
                                               cfgInt(guardCfg, "lock_seconds", 600));
 
+    const Json::Value &regLimitCfg = cc["register_limit"];
+    auto registerGuard = std::make_shared<RegisterGuard>(redis,
+                                                        cfgInt(regLimitCfg, "max_per_ip", 5),
+                                                        cfgInt(regLimitCfg, "window_seconds", 3600));
+
     const Json::Value &smsCfg = cc["sms"];
     // 验证码送达：自签发 / 日志可读模式，不接任何短信网关（详见 SmsSender.h）。
     auto sender = std::make_shared<SmsSender>();
@@ -133,7 +139,7 @@ AppBundle buildBundle() {
     userCfg.minPasswordLength = cfgInt(authCfg, "min_password_length", 6);
 
     auto userService = std::make_shared<UserService>(db, sessions, jwt, guard,
-                                                     smsService, userCfg);
+                                                     registerGuard, smsService, userCfg);
     b.user = std::make_shared<UserController>(userService);
     b.sms = std::make_shared<SmsController>(smsService);
     b.authReady = true;
