@@ -45,6 +45,16 @@
       "mode": "none",
       "shards": 64,
       "bits": 65536
+    },
+    "cache": {
+      "enabled": true,
+      "key_prefix": "seckill",
+      "key_version": "v1",
+      "list_ttl_seconds": 30,
+      "detail_ttl_seconds": 60,
+      "null_ttl_seconds": 60,
+      "jitter_seconds": 30,
+      "invalidate_on_order": "item"
     }
   },
   "db_clients": [
@@ -65,7 +75,7 @@
       "host": "127.0.0.1",
       "port": 6379,
       "passwd": "",
-      "connection_number": 4,
+      "connection_number": 16,
       "timeout": -1
     }
   ]

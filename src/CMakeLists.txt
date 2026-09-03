@@ -5,6 +5,7 @@ add_executable(seckill-cpp
     controllers/UserController.cc
     controllers/SmsController.cc
     service/SeckillService.cc
+    service/SkuCache.cc
     service/password.cc
     service/Jwt.cc
     service/SessionStore.cc

@@ -16,6 +16,7 @@
 #include "service/RegisterGuard.h"
 #include "service/SeckillService.h"
 #include "service/SessionStore.h"
+#include "service/SkuCache.h"
 #include "service/SmsSender.h"
 #include "service/SmsService.h"
 #include "service/UserService.h"
@@ -37,6 +38,7 @@ namespace {
 
 struct AppBundle {
     std::shared_ptr<InflightGuard> lock;
+    std::shared_ptr<seckill::cache::SkuCache> skuCache;  // Redis 不可用时为 nullptr
     std::shared_ptr<SeckillController> seckill;
     std::shared_ptr<UserController> user;  // Redis 不可用时为 nullptr
     std::shared_ptr<SmsController> sms;    // 同上
@@ -69,6 +71,26 @@ const char *lockModeName(InflightGuard::Mode m) {
     }
 }
 
+// 下单后删哪些缓存 key。默认 "item"：只作废被买到的那个 sku 的详情，
+// 列表靠 TTL 自愈 —— 列表是全量聚合 key，任何一个 sku 成交都删它，
+// 在写 QPS 高时命中率会趋零（详见 SkuCache::InvalidateOnOrder）。
+seckill::cache::SkuCache::InvalidateOnOrder parseInvalidateOnOrder(
+    const std::string &s) {
+    using M = seckill::cache::SkuCache::InvalidateOnOrder;
+    if (s == "none") return M::None;
+    if (s == "all") return M::ItemAndList;
+    return M::Item;
+}
+
+const char *invalidateName(seckill::cache::SkuCache::InvalidateOnOrder m) {
+    using M = seckill::cache::SkuCache::InvalidateOnOrder;
+    switch (m) {
+        case M::None: return "none";
+        case M::ItemAndList: return "all";
+        default: return "item";
+    }
+}
+
 AppBundle buildBundle() {
     AppBundle b;
     const Json::Value cc = drogon::app().getCustomConfig();
@@ -90,20 +112,46 @@ AppBundle buildBundle() {
                      "check db_clients in config.json and Drogon MySQL support.";
         exit(1);
     }
-    b.seckill = std::make_shared<SeckillController>(
-        std::make_shared<SeckillService>(db, b.lock));
 
-    // ── 登录 / 短信：依赖 Redis ─────────────────────────────────────────
-    // Redis 不可用时**只关掉登录与短信**，秒杀主链路照常可用。
-    // 这样阶段一的基线压测不会因为中间件没装就整站 500，
-    // 也便于在没装 Redis 的机器上先跑通秒杀。
+    // ── 缓存层（5.1-5.3）与登录 / 短信都依赖 Redis ───────────────────────
+    // Redis 不可用时**只关掉缓存与登录 / 短信**，秒杀主链路照常可用（直连 DB）。
+    // 这样基线压测不会因为中间件没装就整站 500，也便于在没装 Redis 的机器上先跑通秒杀。
     auto redis = drogon::app().getRedisClient("default");
     if (!redis) {
-        LOG_WARN << "Redis client unavailable -> /api/user/* and /api/sms/* disabled; "
-                    "seckill endpoints unaffected. Start redis-server and restart to "
-                    "enable the auth module.";
-        return b;
+        LOG_WARN << "Redis client unavailable -> cache disabled, /api/user/* and "
+                    "/api/sms/* disabled; seckill endpoints still work (DB-direct). "
+                    "Start redis-server and restart to enable them.";
     }
+
+    {
+        const Json::Value &c = cc["cache"];
+        seckill::cache::SkuCache::Config cacheCfg;
+        cacheCfg.enabled = cfgBool(c, "enabled", true);
+        cacheCfg.listTtlSeconds = cfgInt(c, "list_ttl_seconds", 30);
+        cacheCfg.detailTtlSeconds = cfgInt(c, "detail_ttl_seconds", 60);
+        cacheCfg.nullTtlSeconds = cfgInt(c, "null_ttl_seconds", 60);
+        cacheCfg.jitterSeconds = cfgInt(c, "jitter_seconds", 30);
+        cacheCfg.invalidateOnOrder =
+            parseInvalidateOnOrder(cfgStr(c, "invalidate_on_order", "item"));
+
+        seckill::cache::CacheKeys keys(cfgStr(c, "key_prefix", "seckill"),
+                                       cfgStr(c, "key_version", "v1"));
+        // Redis 不可用时 enabled 强制关掉：否则每个读请求都会去打一个空客户端。
+        if (!redis) cacheCfg.enabled = false;
+        b.skuCache =
+            std::make_shared<seckill::cache::SkuCache>(redis, keys, cacheCfg);
+        LOG_INFO << "sku cache: enabled=" << (cacheCfg.enabled ? 1 : 0)
+                 << " listTTL=" << cacheCfg.listTtlSeconds
+                 << " detailTTL=" << cacheCfg.detailTtlSeconds
+                 << " jitter=" << cacheCfg.jitterSeconds
+                 << " invalidateOnOrder=" << invalidateName(cacheCfg.invalidateOnOrder)
+                 << " keyPrefix=" << keys.prefix() << ":" << keys.version();
+    }
+
+    b.seckill = std::make_shared<SeckillController>(
+        std::make_shared<SeckillService>(db, b.lock, b.skuCache));
+
+    if (!redis) return b;
 
     const Json::Value &jwtCfg = cc["jwt"];
     auto jwt = std::make_shared<Jwt>(cfgStr(jwtCfg, "secret", "seckill-cpp-dev-secret"),
@@ -234,6 +282,41 @@ int main() {
             root["data"]["mode"] = lockModeName(inflight->mode());
             root["data"]["acquired"] = Json::UInt64(inflight->acquired());
             root["data"]["rejected"] = Json::UInt64(inflight->rejected());
+            callback(drogon::HttpResponse::newHttpJsonResponse(root));
+        },
+        {drogon::Get});
+
+    // 缓存命中率观测（5.1 的硬要求）：没有它，"缓存到底生效了没有"只能靠感觉。
+    // 压测时打两次（前后各一次）取差值，就是这一轮的真实命中率。
+    // 顺带把实际 key 与 TTL 回显出来，方便直接拿去 redis-cli 里 GET / TTL 核对。
+    drogon::app().registerHandler(
+        "/api/cache/stats",
+        [](const drogon::HttpRequestPtr &,
+           std::function<void(const drogon::HttpResponsePtr &)> &&callback) {
+            auto cache = bundle().skuCache;
+            Json::Value root;
+            root["code"] = 0;
+            Json::Value &d = root["data"];
+            if (!cache || !cache->enabled()) {
+                d["enabled"] = false;
+                d["reason"] = "cache disabled or redis unavailable";
+            } else {
+                const auto s = cache->stats();
+                const uint64_t total = s.hit + s.miss;
+                d["enabled"] = true;
+                d["hit"] = Json::UInt64(s.hit);
+                d["miss"] = Json::UInt64(s.miss);
+                d["err"] = Json::UInt64(s.err);
+                d["write"] = Json::UInt64(s.write);
+                d["hit_rate"] = total > 0 ? static_cast<double>(s.hit) / static_cast<double>(total) : 0.0;
+                d["keys"]["list"] = cache->keys().list();
+                d["keys"]["item_sample"] = cache->keys().item(1);
+                d["ttl"]["list"] = cache->config().listTtlSeconds;
+                d["ttl"]["detail"] = cache->config().detailTtlSeconds;
+                d["ttl"]["null"] = cache->config().nullTtlSeconds;
+                d["ttl"]["jitter"] = cache->config().jitterSeconds;
+                d["invalidate_on_order"] = invalidateName(cache->config().invalidateOnOrder);
+            }
             callback(drogon::HttpResponse::newHttpJsonResponse(root));
         },
         {drogon::Get});

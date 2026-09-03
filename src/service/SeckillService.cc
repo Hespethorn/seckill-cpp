@@ -5,14 +5,43 @@
 
 #include <exception>
 #include <json/json.h>
+#include <memory>
 
 #include "logging/LogStream.h"
 
 using namespace seckill;  // InflightGuard / InflightToken 都定义在 seckill 命名空间
 
+namespace {
+
+// 缓存里存的是**紧凑 JSON 字符串**，不是结构化的 Hash。
+// indentation 置空：去掉所有缩进换行，value 体积和 Redis 内存都省一大截
+// （列表 20 条商品，带缩进约 4KB，紧凑后约 2.6KB —— 省 35%）。
+std::string toCompactJson(const Json::Value &v) {
+    Json::StreamWriterBuilder wb;
+    wb["indentation"] = "";
+    wb["commentStyle"] = "None";
+    return Json::writeString(wb, v);
+}
+
+// 反序列化。失败返回 false，由调用方按"未命中"处理（回源 + 覆盖）。
+// 刻意不把解析错误往外抛：缓存里的数据是副本，副本坏了丢掉就是，
+// 不能让一个副本的问题变成用户看到的一次 500。
+bool fromJson(const std::string &s, Json::Value &out) {
+    if (s.empty()) return false;
+    Json::CharReaderBuilder rb;
+    std::string errs;
+    std::unique_ptr<Json::CharReader> reader(rb.newCharReader());
+    return reader->parse(s.data(), s.data() + s.size(), &out, &errs);
+}
+
+}  // namespace
+
 SeckillService::SeckillService(drogon::orm::DbClientPtr client,
-                               std::shared_ptr<InflightGuard> inflight)
-    : db_(std::move(client)), inflight_(std::move(inflight)) {}
+                               std::shared_ptr<InflightGuard> inflight,
+                               std::shared_ptr<seckill::cache::SkuCache> cache)
+    : db_(std::move(client)),
+      inflight_(std::move(inflight)),
+      cache_(std::move(cache)) {}
 
 void SeckillService::doSeckill(
     int64_t userId,
@@ -55,7 +84,7 @@ void SeckillService::doSeckill(
     //   - cb 在各层 lambda 里按值拷贝（std::function 可拷贝），确保每条路径恰好调用一次、
     //     且不会因为链式 std::move 变成 moved-from 空函数。
     db_->newTransactionAsync(
-        [userId, skuId, cb = std::move(callback), token](
+        [this, userId, skuId, cb = std::move(callback), token](
             const std::shared_ptr<drogon::orm::Transaction> &tx) {
             if (!tx) {
                 // 文档说明：超时情况下回调会拿到空的 shared_ptr。
@@ -68,11 +97,20 @@ void SeckillService::doSeckill(
 
             // 提交结果回调：事务析构自动 commit 之后触发（仅成功才调）。
             tx->setCommitCallback(
-                [cb, token](bool committed) {
-                    if (committed)
+                [cb, token, this, skuId](bool committed) {
+                    if (committed) {
+                        // ── 5.2 / 5.3 写侧：让缓存失效 ────────────────────
+                        // 这里的位置是刻意的：committed 之后才删缓存，
+                        // 保证"数据库已落定"先于"缓存作废"。反序（先删缓存再更新库）
+                        // 会让并发读请求把旧值回填进缓存，且要等 TTL 到期才自愈，
+                        // 这是最常见的缓存不一致来源。删哪些 key 由配置决定
+                        // （默认只删详情，理由见 SkuCache::InvalidateOnOrder）。
+                        // 5.4 会指出：即便顺序对了，仍有极窄窗口能回填旧值 → 延迟双删。
+                        if (cache_) cache_->invalidateOnOrder(skuId);
                         cb(true, "OK");
-                    else
+                    } else {
                         cb(false, "DB_ERROR: commit failed");
+                    }
                 });
 
             // 步骤 1：单行原子扣减。affectedRows==0 说明 stock 已为 0（或行不存在），
@@ -160,21 +198,51 @@ void SeckillService::doSeckill(
 
 void SeckillService::listSkus(
     std::function<void(bool, const Json::Value &)> &&callback) {
+    // 回调所有权：callback 是右值引用参数，而异步回调在 listSkus 返回后才触发，
+    // 所以必须先按值捕获进 cb（一次 move 到函数作用域），再让各条路径【拷贝】cb。
+    // 绝不可对同一个 callback 做两次 std::move：第一次 move 后 callback 已空，
+    // 第二次 move 进错误 lambda 的会是一个空 std::function，一走错误路径就
+    // bad_function_call 直接宕机（阶段一踩过，代价是一个 core）。
+    auto cb = std::move(callback);
+
+    // ── 5.2 缓存读路径：Cache-Aside ─────────────────────────────────────
+    // 顺序固定为「读缓存 → 命中则返回 → 未命中回源 DB → 回写缓存 → 返回」。
+    // 缓存不承担任何正确性责任：它坏了/慢了/不存在，都只是"多查一次库"。
+    if (cache_ && cache_->enabled()) {
+        cache_->getList([cb, this](bool hit, const std::string &value) {
+            if (hit) {
+                Json::Value arr;
+                if (fromJson(value, arr) && arr.isArray()) {
+                    cb(true, arr);
+                    return;
+                }
+                // 缓存里的值不是合法数组：可能是结构升版后旧 key 没过期、
+                // 也可能被人工改过。按"未命中"处理并顺手删掉它 ——
+                // 留着只会让每一次读都白解析一次，永远回不了源。
+                SK_LOG_WARN << "CACHE_LIST_CORRUPTED size=" << value.size();
+                cache_->invalidateList();
+            }
+            queryListFromDb(cb, /*writeCache=*/true);
+        });
+        return;
+    }
+    queryListFromDb(cb, /*writeCache=*/false);
+}
+
+void SeckillService::queryListFromDb(
+    std::function<void(bool, const Json::Value &)> cb, bool writeCache) {
     // 只读查询，不需要事务——直接走 DbClient。start_time/end_time 用 DATE_FORMAT
     // 显式转成字符串，避免 Drogon 把 DATETIME 绑成 tm/Date 类型带来的歧义。
     // 列表接口只暴露"够前端展示"的字段，不返回 create_time 等内部字段。
     //
-    // 回调所有权：callback 是右值引用参数，而异步 DB 回调在 listSkus 返回后才触发，
-    // 所以必须先按值捕获进 cb（一次 move 到函数作用域），再让成功/失败两个 lambda 各自【拷贝】cb。
-    // 绝不可对同一个 callback 做两次 std::move：第一次 move 后 callback 已空，
-    // 第二次 move 进错误 lambda 的会是一个空 std::function，DB 一报错就 bad_function_call 直接宕机。
-    auto cb = std::move(callback);
+    // LIMIT 100 同时是**缓存的自我保护**：列表是一个 key，行数越多 value 越大，
+    // 上限锁死 100 条（紧凑 JSON 约 15KB），就不会长成一个 string 大 key。
     db_->execSqlAsync(
         "SELECT id, name, stock, total, "
         "DATE_FORMAT(start_time, '%Y-%m-%d %H:%i:%s') AS start_time, "
         "DATE_FORMAT(end_time, '%Y-%m-%d %H:%i:%s') AS end_time "
         "FROM seckill_sku ORDER BY id ASC LIMIT 100",
-        [cb](const drogon::orm::Result &result) {
+        [cb, writeCache, this](const drogon::orm::Result &result) {
             Json::Value arr(Json::arrayValue);
             for (const auto &row : result) {
                 Json::Value item;
@@ -186,6 +254,8 @@ void SeckillService::listSkus(
                 item["endTime"] = row["end_time"].as<std::string>();
                 arr.append(item);
             }
+            // 回写是 fire-and-forget：失败不影响本次响应（见 SkuCache::setex）
+            if (writeCache && cache_) cache_->setList(toCompactJson(arr));
             cb(true, arr);
         },
         [cb](const std::exception_ptr &eptr) {
@@ -201,16 +271,51 @@ void SeckillService::listSkus(
 void SeckillService::detailSku(
     int64_t skuId,
     std::function<void(bool, const Json::Value &)> &&callback) {
-    // 回调所有权同 listSkus：先 move 进 cb，两个 lambda 各自拷贝 cb，
-    // 避免对同一个 callback 二次 move 导致错误路径调用空 std::function 而宕机。
+    // 回调所有权同上：先 move 进 cb，后续各路径拷贝使用。
     auto cb = std::move(callback);
+
+    // ── 5.3 缓存读路径：Cache-Aside（+ 空值占位防穿透，5.6）──────────────
+    if (cache_ && cache_->enabled()) {
+        cache_->getDetail(skuId, [cb, this, skuId](bool hit,
+                                                   const std::string &value) {
+            if (hit) {
+                // 空值哨兵：上一次已经查过库、确认这个 sku 不存在。
+                // 命中它等于"没打数据库就知道不存在" —— 这正是防穿透要的效果。
+                if (value == seckill::cache::SkuCache::kNullValue) {
+                    cb(false, Json::Value());
+                    return;
+                }
+                Json::Value item;
+                if (fromJson(value, item) && item.isObject()) {
+                    cb(true, item);
+                    return;
+                }
+                SK_LOG_WARN << "CACHE_ITEM_CORRUPTED skuId=" << skuId
+                            << " size=" << value.size();
+                // 详情坏值连带删列表：列表里也含这个 sku 的 stock，一起作废更省心
+                cache_->invalidate(skuId);
+            }
+            queryDetailFromDb(skuId, cb, /*writeCache=*/true);
+        });
+        return;
+    }
+    queryDetailFromDb(skuId, cb, /*writeCache=*/false);
+}
+
+void SeckillService::queryDetailFromDb(
+    int64_t skuId,
+    std::function<void(bool, const Json::Value &)> cb, bool writeCache) {
     db_->execSqlAsync(
         "SELECT id, name, stock, total, "
         "DATE_FORMAT(start_time, '%Y-%m-%d %H:%i:%s') AS start_time, "
         "DATE_FORMAT(end_time, '%Y-%m-%d %H:%i:%s') AS end_time "
         "FROM seckill_sku WHERE id = ?",
-        [cb](const drogon::orm::Result &result) {
+        [cb, writeCache, this, skuId](const drogon::orm::Result &result) {
             if (result.size() == 0) {
+                // 查不到也要缓存（空值占位）：否则用随机不存在的 id 反复请求，
+                // 每次都穿透到 DB —— 缓存层对这种攻击完全失效，这就是缓存穿透。
+                // 占位的 TTL 用最短的一档，避免新上架商品长时间查不到。
+                if (writeCache && cache_) cache_->setNull(skuId);
                 cb(false, Json::Value());  // 不存在
                 return;
             }
@@ -222,6 +327,7 @@ void SeckillService::detailSku(
             item["total"] = row["total"].as<int>();
             item["startTime"] = row["start_time"].as<std::string>();
             item["endTime"] = row["end_time"].as<std::string>();
+            if (writeCache && cache_) cache_->setDetail(skuId, toCompactJson(item));
             cb(true, item);
         },
         [cb](const std::exception_ptr &eptr) {
