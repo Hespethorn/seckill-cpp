@@ -1,12 +1,15 @@
-# 缓存设计规范（第五章 5.1 ~ 5.3）
+# 缓存设计规范（第五章 5.1 ~ 5.8）
 
 > 本文件是**缓存层的规格说明**：Key 怎么命名、Value 存什么、TTL 怎么定、写操作之后
-> 删哪些 key、Redis 挂了怎么办、收益怎么量化。
+> 删哪些 key、Redis 挂了怎么办、收益怎么量化，以及 5.4~5.8 各项增强的取舍与验证。
 > 阶段路线与进度看板见 [`PLAN.md`](PLAN.md)，本文件只讲缓存本身。
 >
-> 配套实现：`src/service/CacheKeys.h`（Key 唯一构造入口）、`src/service/SkuCache.*`（Redis 封装）、
-> `SeckillService::listSkus / detailSku / doSeckill`（读写路径）。
-> 配套压测：`scripts/read-bench.sh`、`jmeter/read-baseline.jmx`。
+> 配套实现：`src/service/CacheKeys.h`（Key 唯一构造入口）、`src/service/SkuCache.*`（Redis 封装 +
+> 5.4 延迟双删 + 5.8 本地 L1）、`src/service/LocalLruCache.h`（5.8 自实现 LRU）、
+> `src/service/BloomFilter.h`（5.7 自实现布隆）、`SeckillService::listSkus / detailSku / doSeckill / warmCache /
+> rebuildBloom`（读写路径与运营动作）。
+> 配套压测：`scripts/read-bench.sh`（5.1~5.3 基线）、`scripts/local-bench.sh`（5.8 L1 对比）、
+> `jmeter/read-baseline.jmx`。
 
 ---
 
@@ -109,8 +112,11 @@ GET /api/seckill/999999   →  DB 查无此行  →  SETEX seckill:sku:v1:item:9
 - 设短了：穿透防护变弱。
 - 60s 的实际效果：攻击者用随机 id 打库，**每个 id 每分钟最多穿透一次**——足以把"打穿"变成"打不穿"。
 
-> 为什么不用布隆过滤器（5.7 的内容）：布隆过滤器解决的是"id 集合海量且基本不变"的穿透；
-> 秒杀商品是几十到几百个、还会上下架，空值缓存性价比更高且没有误判。等商品量级上去再引入。
+> 为什么还要布隆过滤器（5.7 已落地，见 §3.4）：空值哨兵把**同一个不存在 id** 的重复
+> 穿透挡在 Redis 内；但当 id 集合海量（20 万种子）且攻击者随机打 id 时，每一个不存在
+> 的 id 都要在 Redis 占一个 key，内存成本随攻击流量线性增长。布隆在**进程内**用几十万
+> bit 维护"DB 中真实存在的 sku id 全集"摘要，说"一定不存在"的 id 连 Redis 都不打。
+> 二者互补：布隆挡全集之外（海量随机），哨兵挡布隆放行后仍 miss 的边角（如上下架过渡）。
 
 ---
 
@@ -177,8 +183,9 @@ GET /api/seckill/999999   →  DB 查无此行  →  SETEX seckill:sku:v1:item:9
 默认值选 `item`，理由写在上表里了。这个开关存在的意义是：**把取舍显式化**，
 而不是悄悄写死一个行为让后面的人猜。
 
-> 5.4 会展开：即便顺序对了，并发下仍有一个极窄窗口能让旧值回填（读请求在 `DEL` 之前
-> 读到旧值、在 `DEL` 之后才写回缓存）→ 延迟双删。当前实现的残留不一致窗口 = 一次 DB 查询时间。
+> 5.4 已落地（延迟双删，见 §11.1）：即便顺序对了，并发下仍有一个极窄窗口能让旧值
+> 回填（读请求在 `DEL` 之前读到旧值、在 `DEL` 之后才写回缓存）→ 删两次，第二次在
+> 延迟后执行。未开启时残留不一致窗口 = 一次 DB 查询时间。
 
 ---
 
@@ -186,9 +193,9 @@ GET /api/seckill/999999   →  DB 查无此行  →  SETEX seckill:sku:v1:item:9
 
 | 问题 | 现象 | 当前对策 | 章节 |
 | --- | --- | --- | --- |
-| 缓存穿透 | 查不存在的 key，绕过缓存直打 DB | ✅ 空值哨兵（§3.3） | 5.6（已提前落地） |
-| 缓存雪崩 | 大批 key 同时失效，请求集体回源 | ✅ TTL 随机抖动（§4） | 5.5 相关 |
-| 缓存击穿 | 单个热点 key 失效瞬间，所有请求同时回源 | ❌ 未处理 | 5.5 之后（互斥重建 / 逻辑过期） |
+| 缓存穿透 | 查不存在的 key，绕过缓存直打 DB | ✅ 空值哨兵（§3.3）+ ✅ **布隆预过滤（§11.3）** | 5.6 + 5.7（均已落地） |
+| 缓存雪崩 | 大批 key 同时失效，请求集体回源 | ✅ TTL 随机抖动（§4）+ ✅ **启动前预热（§11.2）** | 5.5（已落地） |
+| 缓存击穿 | 单个热点 key 失效瞬间，所有请求同时回源 | ⏳ 未处理（互斥重建 / 逻辑过期留到后续；理由见下） | 5.5 之后 |
 
 击穿为什么现在不做：热点 key 失效后，并发回源的是**同一个 sku 的单行主键查询**，
 MySQL 扛得住（不是行锁竞争，是共享读）。真正的代价只是一次慢查询，不值得为它引入
@@ -266,15 +273,136 @@ WSL 上 HC4 初始化失败 → 0 样本（`.jmx` 里强制 `implementation=Java
 
 ---
 
-## 10. 本次实现的已知不足
+## 10. 已知不足与后续（2026-09-03 收尾更新）
 
-诚实清单，每一条都对应后续章节：
+诚实清单，每一条都对应后续工作：
 
-1. **单 `DEL` 有残留不一致窗口**（§5.2）→ 5.4 延迟双删。
-2. **无缓存预热**：进程刚启动时缓存是空的，第一批请求全部回源 → 5.5。
-3. **无击穿保护**：热点 key 失效瞬间并发回源（当前可接受，见 §6）→ 5.5 之后。
-4. **无布隆过滤器**：空值缓存对"海量随机 id"仍有内存成本 → 5.7。
-5. **单级缓存**：每次命中都要走一次 Redis 网络往返（约 0.2~0.5ms）→ 5.8 加本地 LRU 做多级。
-6. **库存字段的可缓存性本身是有争议的**：`stock` 是强实时字段，当前靠短 TTL + 下单 `DEL` 兜底。
-   阶段四（7.10）会把它拆成独立的 `stock:{id}` 计数，由 Redis 直接承载，届时列表/详情里的
-   stock 将改为实时拼装，不再是缓存里的陈旧值。
+1. **延迟双删默认关闭**：`double_delete_ms` 默认 0（单 DEL + TTL 自愈）。
+   双删多删一次"可能已被新值重建"的缓存（多一次 miss），一致性换命中率——
+   秒杀读多写少、写后立即 DEL 的窗口本就很窄，默认不付这个代价。→ 见 §11.1。
+2. **预热是手动运营动作**：不做服务启动自预热（启动时预热多少、要不要等它完成
+   再收流量，是编排问题不是服务问题）。`POST /api/cache/warm` 提供能力。→ §11.2。
+3. **无击穿保护**（热点 key 失效瞬间并发回源）：当前可接受，见 §6。留到后续章节
+   （互斥重建 / 逻辑过期）。
+4. **布隆默认关闭 + 需要手动重建**：`bloom_enabled` 默认 false；开启后必须
+   `warm rebuild_bloom=true` 构建。布隆只挡"构建时刻的 id 全集"——**之后新增的 sku
+   在重建前会被误判不存在**，运营加品后必须重跑 rebuild（幂等）。→ §11.3。
+5. **本地 L1 默认关闭**：`local_enabled` 默认 false。单实例语义下失效与 Redis 同步；
+   **多实例部署时本地缓存无法精确失效**（DEL 只到本机），届时 L1 只应放几乎不变的
+   数据，stock 这类强实时字段不下 L1。→ §11.4。
+6. **库存字段的可缓存性本身是有争议的**：`stock` 是强实时字段，当前靠短 TTL + 下单
+   DEL 兜底。阶段四（7.10）会把它拆成独立的 `stock:{id}` 计数，由 Redis 直接承载，
+   届时列表/详情里的 stock 将改为实时拼装，不再是缓存里的陈旧值。
+
+---
+
+## 11. 阶段二收尾：5.4 ~ 5.8 落地记录（2026-09-03）
+
+> 代码与 commit 见 `docs/PLAN.md` 第五章进度；本节只记每项**为什么这样做**与**怎么验证**。
+> 所有实测数字（QPS/延迟/命中率）等 WSL 跑完压测后回填到 PLAN §5。
+
+### 11.1 缓存一致性：延迟双删（5.4）
+
+下单成功后 `DEL` 缓存挂 DB 事务 commit 回调，保证"先 DB 后删缓存"。但并发下仍有一个
+窄窗口：读请求 **在 DEL 前** 读到旧值、**在 DEL 后** 才把旧值回写缓存 → 缓存里是脏值，
+要等 TTL 自愈。延迟双删就是删两次：第一次删完，隔 `doubleDeleteMs` 毫秒再删一次，
+把窗口内回填的旧值也清掉。
+
+| 项 | 值 |
+| --- | --- |
+| 配置 | `cache.double_delete_ms`（0=关闭，默认；>0 如 500/1000 开启） |
+| 实现 | `SkuCache` 内嵌**专用延时删除线程**（mutex+condvar 任务队列），投递只 push+notify，绝不在 IO 线程 sleep；到点后从后台线程发异步 `DEL` |
+| 计数 | `/api/cache/stats` 的 `delayed_delete`：二次删除执行次数 |
+
+为什么默认关：双删的代价是**多删一次"可能已被新值重建"的缓存**（多一次 miss 回源）。
+本项目下单量远小于读量、且写后立即 DEL 的回填窗口很窄，默认不付这个代价；需要更严
+一致性（对 stock 精度敏感）时再开。这是"一致性 ↔ 命中率"的显式交换。
+
+验证（WSL）：`config.json` 设 `"double_delete_ms": 1000` 重启 → 下单一个 sku →
+观察两次删除（日志 / `redis-cli MONITOR` 里同一 key 出现两次 DEL，间隔约 1s），
+`/api/cache/stats` 的 `delayed_delete` 递增。改回 0 后下单则只有一次 DEL。
+
+### 11.2 缓存预热（5.5）
+
+进程刚启动时缓存是空的：洪峰第一波全部 miss 回源 DB，缓存不但没挡流量反而制造
+"回写风暴"（每个 miss 请求都回写一次）。预热 = 在流量进来之前把该在缓存里的数据放进去。
+
+| 项 | 值 |
+| --- | --- |
+| 接口 | `POST /api/cache/warm`，body 可选 `{"limit": N}`（默认 1000） |
+| 脚本 | `bash scripts/cache-warm.sh [limit]` |
+| 行为 | 一条 SQL 取前 limit 条 sku：前 100 条重建列表缓存，每条回写详情缓存（fire-and-forget，幂等） |
+
+为什么是运营动作而不是启动自预热：预热要回答"预热多少、要不要等它完成再收流量"，
+这是**编排问题**不是服务问题。做成 HTTP 端点后，压测的 on 轮、真实活动的开始前
+都能显式调用同一份能力（`read-bench.sh` / `local-bench.sh` 的 warmup 已改用它）。
+
+验证（WSL）：服务跑起来后先 `bash scripts/cache-warm.sh 2000`，`redis-cli --scan --pattern
+'seckill:sku:v1:item:*' | wc -l` ≈ 2000；`GET /api/seckill/list` 打一次后再看 Redis
+列表 key 已存在。
+
+### 11.3 防穿透：布隆过滤器前置校验（5.7）
+
+空值哨兵挡"同一个不存在 id 的重复穿透"，但 20 万量级下攻击者随机打 id 时，
+**每一个不存在 id 都要占一个 Redis key**——内存随攻击流量线性涨。布隆在进程内用
+约 m bit 维护"DB 中真实存在的 sku id 全集"摘要，查询先过它：
+
+| 项 | 值 |
+| --- | --- |
+| 配置 | `cache.bloom_enabled`（默认 false）/ `bloom_capacity`（默认 500000，预期元素数）/ `bloom_error_rate`（默认 0.001） |
+| 构建 | `POST /api/cache/warm {"rebuild_bloom": true}`：一条 SQL 拉全量 id，离线构建后**整体替换指针发布**（无中间态） |
+| 接入点 | `detailSku` 读缓存前：`maybeContains==false` 直接 404，**连 Redis 都不打** |
+| 计数 | `/api/cache/stats` 的 `bloom.rejected`：被布隆直接挡掉的请求数 |
+| 尺寸 | capacity=50 万 / p=0.001 → m≈719 万 bit≈0.9MB，k≈10 |
+
+**语义要点**：布隆只能判"一定不存在"（false），"可能存在"（true）含误判（此处 ~0.1%，
+代价只是放行一次回源）。**fail-open**：未构建时 maybeContains 恒 true，冷启动不误杀。
+**运维红线**：布隆是"构建时刻的 id 全集"——构建后新加的 sku 在重建前会被误判不存在，
+运营加品后必须重跑 rebuild（幂等，可随时重跑）。
+
+验证（WSL）：`bloom_enabled: true` → 重启 → `warm {"rebuild_bloom":true}` →
+反复请求不存在的 id（如商品数+100000）→ `/api/cache/stats` 的 `bloom.rejected`
+持续增长且 `miss`（DB 回源）几乎不涨、Redis 也不出现该 id 的空值 key。
+
+### 11.4 多级缓存：本地 LRU 做 L1（5.8）
+
+L2 Redis 一次命中也要一次网络往返（0.2~0.5ms）。洪峰期所有用户刷同一批热 key，
+这个往返是纯开销 → 进程内加 L1：读路径 L1（本地 LRU）→ L2（Redis）→ L3（DB）。
+
+| 项 | 值 |
+| --- | --- |
+| 配置 | `cache.local_enabled`（默认 false）/ `cache.local_capacity`（默认 4096 条） |
+| 实现 | `LocalLruCache.h`：`unordered_map` + `list` 自实现（LRU 全部内涵）；锁内只搬 `shared_ptr` 不拷 13KB JSON；TTL 惰性过期 + 容量逐出 |
+| 一致性 | setex/del/invalidate 同步写删本地——**单实例**下下单失效窗口与纯 Redis 相同 |
+| 计数 | `/api/cache/stats` 的 `local_hit`：L1 挡下的命中数（⊆ hit） |
+
+**为什么 L1 只对热 key 有效（也是压测口径的依据）**：L1 容量有限（4096），面对
+"全量 20 万随机 id"的流量命中率趋零，测出来"L1 没用"不是 L1 没用而是场景不对。
+真实秒杀就是少数爆品被几万人刷——所以 `scripts/local-bench.sh` 的详情只打 1..HOT
+热点子集（默认 2000，与预热范围一致），列表仍是单 key。这恰是本章要讲的方法论点。
+
+**多实例注意**：本地缓存无法跨实例精确失效（DEL 只到本机）。本项目单进程（4 IO 线程
+共享内存）语义安全；将来多实例部署时 L1 只应放几乎不变的数据，stock 这类强实时字段
+不下 L1（见 §10.6，阶段四拆 stock 计数后）。
+
+验证（WSL）：`bash scripts/local-bench.sh`（自动跑 on=纯Redis 与 local=L1+L2 两轮并
+打印对比）。预期：list 提升明显（单 key 近乎全 L1 命中），detail 在热点子集内命中率
+高；同流量下 local 轮 QPS 更高、avg/p50 更低，两轮 miss（DB 回源）应接近。
+
+### 11.5 新配置项与 stats 字段汇总（5.4~5.8）
+
+```jsonc
+// config.json → custom_config.cache 新增：
+"double_delete_ms": 0,        // 5.4 延迟双删延迟毫秒，0=关
+"bloom_enabled": false,       // 5.7 布隆，构建后才生效（fail-open）
+"bloom_capacity": 500000,     // 5.7 预期元素数（≥ 实际 sku 数）
+"bloom_error_rate": 0.001,    // 5.7 允许误判率
+"local_enabled": false,       // 5.8 L1 本地 LRU
+"local_capacity": 4096        // 5.8 L1 容量（条目数）
+```
+
+`GET /api/cache/stats` 新增回显：`delayed_delete`、`local_hit`、`local_enabled`、
+`local_capacity`、`double_delete_ms`、`bloom.{enabled,ready,added,rejected,bits,hashes}`。
+
+所有默认值均保持"关闭/不改变 5.1~5.3 既有行为"，5.1~5.3 的结论（×1.40/×1.44、
+命中率 83.8%）不受影响；5.4/5.7/5.8 的收益数字靠各自开关与脚本另行实测。

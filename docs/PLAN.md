@@ -27,7 +27,7 @@
 | 阶段 | 版本 | 手段 | 预期 QPS | 本仓库对应 | 状态 |
 | --- | --- | --- | --- | --- | --- |
 | 1 | `v0.1.x` | 直接打数据库（事务 + 原子扣减） | ~50（实测 ≈371 基线） | 二/三/四章 | 收尾中 |
-| 2 | `v0.2.x` | Redis 缓存 + 预扣减 + 异步落库 | 数千 | 五章 | 进行中（5.1~5.3 代码+压测完成：20万条 JMeter 实测 on/off 提升 ×1.40(list)/×1.44(detail)，命中率 83.8%，DB 读负载降约 77%；5.1~5.3 博客已写） |
+| 2 | `v0.2.x` | Redis 缓存 + 预扣减 + 异步落库 | 数千 | 五章 | **代码完成（5.1~5.8）**：读缓存已实测 ×1.40(list)/×1.44(detail)、命中率 83.8%（§5.3）；5.4/5.7/5.8 收益数字待 WSL 实测回填（清单见 §5.4）。博客 5.1~5.3 已写，5.4~5.8 待产出 |
 | 3 | `v0.3.x` | MQ 削峰填谷 | 数万 | 六章 | 待开始 |
 | 4 | `v1.0.0` | 微服务 + 限流 / 治理 | 30000+ | 七/八章 | 待开始 |
 
@@ -36,7 +36,7 @@
 | 代码阶段 | 版本 | 预期 QPS | 覆盖博客章节 | 状态 |
 | --- | --- | --- | --- | --- |
 | 阶段一 | `v0.1.x` | ≈371（实测基线，官方 JMeter） | 二（表设计/搭建）、三（登录模块）、四（基础秒杀） | 收尾中 |
-| 阶段二 | `v0.2.x` | 数千 | 五（缓存层 Redis） | 进行中（5.1~5.3 代码+压测完成：20万条 JMeter 实测 on/off 提升 ×1.40(list)/×1.44(detail)，命中率 83.8%，DB 读负载降约 77%；5.1~5.3 博客已写） |
+| 阶段二 | `v0.2.x` | 数千 | 五（缓存层 Redis） | **代码完成（5.1~5.8）**；博客 5.1~5.3 已写；5.4~5.8 收益数字待 WSL 实测回填（§5.4 清单） |
 | 阶段三 | `v0.3.x` | 数万 | 六（MQ 削峰填谷） | 待开始 |
 | 阶段四 | `v1.0.0` | 30000+ | 七（Lua 原子预扣）、八（防刷限流） | 待开始 |
 
@@ -87,20 +87,24 @@
 
 > 当前 `/api/seckill` 已实现 4.1/4.2/4.3/4.6/4.8 核心逻辑（查询 + 原子扣减 + 幂等 + 应用层闸门），但博客文章 4.1/4.2/4.3/4.6/4.4/4.5/4.7/4.8 尚未写；代码侧超卖 / 重复下单已解决并实测验证（correct 模式 0 超卖、baseline QPS≈371），文章按"项目先行、博客随后"约定待产出。
 
-### 第五章 引入缓存层：读性能优化（阶段二 `v0.2.x`）— 进行中（5.1~5.3 代码+压测完成：20万条 JMeter 实测 ×1.40/×1.44、命中率 83.8%，5.1~5.3 博客已写）
+### 第五章 引入缓存层：读性能优化（阶段二 `v0.2.x`）— 代码完成（5.1~5.8），博客 5.4~5.8 待产出
 
 - [x] 5.1 缓存 Key 设计规范与接口基线压测 — `seckcpp0501` — ✅ 规范落地（**[`docs/CACHE-DESIGN.md`](CACHE-DESIGN.md)** + `service/CacheKeys.h`）；压测脚本就绪（`scripts/read-bench.sh` + `jmeter/read-baseline.jmx`），**实测数字已回填 §5.3**（20万条 JMeter：on/off ×1.40(list)/×1.44(detail)，命中率 83.8%）
 - [x] 5.2 加 Redis 缓存：商品列表接口 — `seckcpp0502` — ✅ 代码完成（`SkuCache::getList/setList` + `SeckillService::listSkus` Cache-Aside）
 - [x] 5.3 加 Redis 缓存：商品详情接口 — `seckcpp0503` — ✅ 代码完成（含空值哨兵，顺带落地 5.6 的一半）+ 下单提交后按配置失效（默认只删详情）
-- [ ] 5.4 缓存一致性：Cache-Aside / 延迟双删 — `seckcpp0504`
-- [ ] 5.5 缓存预热与动态 TTL — `seckcpp0505`
-- [ ] 5.6 防缓存穿透：空值策略 — `seckcpp0506` — **空值哨兵已随 5.3 落地**（`SkuCache::setNull`，TTL 60s），章节正文待补
-- [ ] 5.7 防缓存穿透：布隆过滤器 — `seckcpp0507`
-- [ ] 5.8 本地缓存（自实现 LRU）做多级缓存 — `seckcpp0508`
+- [x] 5.4 缓存一致性：Cache-Aside / 延迟双删 — `seckcpp0504` — ✅ 代码完成（commit `cc5f557`：`double_delete_ms` 可配，默认 0 关；专用延时删除线程到点二次 DEL；stats `delayed_delete`）
+- [x] 5.5 缓存预热与动态 TTL — `seckcpp0505` — ✅ 代码完成（commit `e4ce2d4`：`POST /api/cache/warm` + `scripts/cache-warm.sh`，一次 SQL 重建列表 + 批量预热详情；动态 TTL 在博客讲原理，本项目商品静态不落地）
+- [x] 5.6 防缓存穿透：空值策略 — `seckcpp0506` — ✅ **空值哨兵已随 5.3 落地**（`SkuCache::setNull`，TTL 60s），章节正文待补（博客随 5.4~5.8 一并产出）
+- [x] 5.7 防缓存穿透：布隆过滤器 — `seckcpp0507` — ✅ 代码完成（commit `d764a4c`：自实现 `service/BloomFilter.h` + detail 前置过滤 + warm 端点 `rebuild_bloom` 重建；默认关，见 CACHE-DESIGN §11.3）
+- [x] 5.8 本地缓存（自实现 LRU）做多级缓存 — `seckcpp0508` — ✅ 代码完成（commit `4a0c246`：`service/LocalLruCache.h` 内嵌 SkuCache 为 L1 + `scripts/local-bench.sh` 对比压测；默认关，见 CACHE-DESIGN §11.4）
 
 > 加缓存的对象是**读**接口（列表 / 详情），下单接口只多一步"提交成功后失效缓存"。
 > 规格细节（Key 规范、TTL、失效范围取舍、fail-open 论证、已知不足）全部收敛在
 > **[`docs/CACHE-DESIGN.md`](CACHE-DESIGN.md)**，本文件不重复。
+> 5.4~5.8 各项增强（延迟双删 / 预热 / 布隆 / 本地 L1）的取舍与验证见
+> CACHE-DESIGN **§11**；收益数字压测后回填 §5.4。
+> 注意：5.4/5.7/5.8 新功能默认**全部关闭**，5.1~5.3 的既有实测结论（×1.40/×1.44、
+> 命中率 83.8%）不受影响。
 
 ### 第六章 消息队列削峰填谷（阶段三 `v0.3.x`，AMQP-CPP）— 待开始
 
@@ -155,6 +159,7 @@
 | ADR-5 | Drogon 1.9.x 回调式 vs 协程 | 2026-08-28 | `897262e` / `3aa3b31` / `589cb5e` |
 | ADR-6 | 同 IP 注册频控（自签发模式下的批量注册防护） | 2026-09-02 | 代码落地于本次会话（新增 `service/RegisterGuard.*`） |
 | ADR-7 | 缓存 Key 规范与失效范围取舍（第五章 5.1~5.3） | 2026-09-03 | 代码落地于本次会话（`service/CacheKeys.h`、`SkuCache.*`、规范见 `docs/CACHE-DESIGN.md`） |
+| ADR-8 | 5.4~5.8 四项增强的默认关闭决策（延迟双删 / 预热端点 / 布隆 / 本地 L1） | 2026-09-03 | `cc5f557`（5.4）/ `e4ce2d4`（5.5）/ `d764a4c`（5.7）/ `4a0c246`（5.8） |
 
 > 决策日志索引：每条 ADR 的"拍板日 + 落地 commit"见上表；下方各节附详细论证。
 
@@ -275,6 +280,23 @@ Drogon 的 IO 线程上只允许非阻塞操作，下面这处是同步阻塞的
 
 **④ 缓存必须 fail-open**（对比 `SessionStore` 的 fail-close）：错放一次缓存 = 多查一次库（无正确性损失），错放一次会话 = 被封禁 token 能下单（安全事件）。判据是**误放的代价 vs 误杀的代价**。
 
+### ADR-8 阶段二收尾四项增强：一律"默认关闭 + 开关显式打开"
+
+> 决策日：2026-09-03 ｜ 落地提交：`cc5f557`（5.4）/ `e4ce2d4`（5.5）/ `d764a4c`（5.7）/ `4a0c246`（5.8）
+
+5.4~5.8 每一项都会改变"读接口行为"，若默认打开，5.1~5.3 已实测的基线（×1.40/×1.44、
+命中率 83.8%）立刻失真，读者也无法把"哪一层加了什么"分开度量。所以：
+
+| 增强 | 默认值 | 为什么默认关 |
+| --- | --- | --- |
+| 5.4 延迟双删（`double_delete_ms`） | `0` | 多删一次"可能已被新值重建"的缓存 = 多一次 miss，一致性换命中率；本项目回填窗口本就窄，需要更严一致性才开 |
+| 5.5 预热（`/api/cache/warm`） | 无开关，动作型端点 | 预热是**运营编排**（活动开始前调一次），不是服务启动副作用；默认不启动自预热 |
+| 5.7 布隆（`bloom_enabled`） | `false` | 集合语义要求"构建时刻的全量 id"，未构建时须放行（fail-open）；且布隆构建后**新增 sku 会被误判不存在**，需加品后重建 —— 属运营动作，不开默认 |
+| 5.8 本地 L1（`local_enabled`） | `false` | 单实例语义安全，**多实例无法精确失效**；且 L1 只对热 key 有收益，默认单级 Redis 最稳 |
+
+配套原则：每项增强都有自己的压测脚本或验证路径（5.8→`scripts/local-bench.sh`、
+5.7→stats `bloom.rejected`、5.4→stats `delayed_delete`），不开默认也能独立证伪。
+
 ---
 
 ### 阶段一的功能抉择（重点）
@@ -384,6 +406,58 @@ bash scripts/read-bench.sh            # 总并发 100（列表 60 / 详情 40）
 > 压测前后各读一次 `/api/cache/stats` 取差值，避免把预热阶段的计数算进来。
 > 坑位：两轮数字完全一样 → 先确认服务端的 `enabled` 是否真的跟着变了（改 config 没重启 = 白跑一轮）。
 
+### 5.4 阶段二收尾：WSL 验证清单（代码已就绪，等老周实跑后回填数字）
+
+前置：MySQL/Redis 在跑、`bash scripts/build-wsl.sh` 编译通过、服务 `./build/src/seckill-cpp` 已起。
+
+**① 构建 + 冒烟（新功能不破坏旧行为）**
+```bash
+bash scripts/build-wsl.sh          # 编译通过 = 5.4/5.5/5.7/5.8 代码无编译错
+./build/src/seckill-cpp &          # 另开终端跑服务
+curl -s localhost:8080/api/cache/stats
+#   应看到 enabled=true、double_delete_ms=0、local_enabled=false、bloom.enabled=false
+curl -s localhost:8080/api/seckill/list | head -c 200    # 读缓存正常
+```
+
+**② 5.4 延迟双删**（改 `config.json` `"double_delete_ms": 1000` → 重启服务）
+```bash
+# 开启后下单一个 sku，应能看到两次删除（间隔 ~1s）+ stats.delayed_delete 递增：
+curl -s -X POST localhost:8080/api/seckill -H 'Content-Type: application/json' \
+     -d '{"userId":1,"skuId":1}'
+curl -s localhost:8080/api/cache/stats | grep -o '"delayed_delete":[0-9]*'
+# 验证完改回 0 重启（默认值保持基线不变）
+```
+
+**③ 5.5 缓存预热**
+```bash
+bash scripts/cache-warm.sh 2000
+redis-cli --scan --pattern 'seckill:sku:v1:item:*' | wc -l    # ≈2000
+redis-cli EXISTS seckill:sku:v1:list                          # 1（列表已建）
+```
+
+**④ 5.7 布隆过滤器**（改 `config.json` `"bloom_enabled": true` → 重启）
+```bash
+curl -s -X POST localhost:8080/api/cache/warm -H 'Content-Type: application/json' \
+     -d '{"limit":1000,"rebuild_bloom":true}'                 # 重建布隆
+curl -s localhost:8080/api/cache/stats | grep -o '"bloom":{[^}]*}'  # ready=true
+# 拿一个不存在的 id 连打 100 次（商品数+100000 必不存在）：
+curl -s -o /dev/null -w '%{http_code}\n' localhost:8080/api/seckill/200100  # 404 且极快
+# stats：bloom.rejected 应=100（全部被挡），miss（DB回源）不增长
+# 对比：未开布隆时同样 100 次打不存在的 id，空值哨兵会写 100 个 Redis key
+```
+
+**⑤ 5.8 本地 LRU 多级缓存**（脚本自动开 local_enabled，测完自动恢复）
+```bash
+mysql -h127.0.0.1 -useckill -pseckill seckill < sql/seed_sku.sql   # 若已被改少先恢复 20 万条
+bash scripts/local-bench.sh 100 20 2000    # on(纯Redis) vs local(L1+Redis) 两轮
+# 预期：list 提升明显；detail 在 1..2000 热点子集内高命中；两轮 miss 接近；
+# local 轮 /api/cache/stats 的 local_hit 占 hit 大头
+# 跑完把数字贴给我 → 回填本 PLAN 与博客
+```
+
+**⑥ 回归**：`bash scripts/read-bench.sh`（默认配置下应复现 ×1.40/×1.44 附近，5.4~5.8 全关
+不影响旧基线）。
+
 ---
 
 ## 6. 开发排障（WSL + MySQL + Drogon）
@@ -476,7 +550,8 @@ SHOW PROCESSLIST;
 | GET | `/api/seckill/list` | 商品列表（5.2 起走 Redis 缓存） | MySQL（+Redis） |
 | GET | `/api/seckill/{skuId}` | 商品详情（5.3 起走 Redis 缓存，含空值哨兵） | MySQL（+Redis） |
 | GET | `/api/lock/stats` | 4.8 在途闸门统计（mode / acquired / rejected） | — |
-| GET | `/api/cache/stats` | 5.1 缓存命中率（hit / miss / err / write / hit_rate + 实际 key 与 TTL） | Redis |
+| GET | `/api/cache/stats` | 5.1 缓存命中率（hit / miss / err / write / hit_rate + 5.4~5.8 的 delayed_delete / local_hit / bloom.* 状态 + 实际 key 与 TTL） | Redis |
+| POST | `/api/cache/warm` | 5.5 缓存预热 + 5.7 布隆重建（body `{"limit":N,"rebuild_bloom":true}`，默认 limit=1000） | MySQL + Redis |
 | POST | `/api/sms/send` | 发送短信验证码 | **Redis** |
 | POST | `/api/user/register` | 注册（默认需验证码） | MySQL + Redis |
 | POST | `/api/user/login` | 登录，返回 Bearer Token | MySQL + Redis |
@@ -563,6 +638,9 @@ bash scripts/verify-auth.sh 13800001111 abc123
 | `cache` | `key_prefix` / `key_version` | `seckill` / `v1` | Key 前缀与结构版本号（改结构就升版本，不清库） |
 | `cache` | `list_ttl_seconds` / `detail_ttl_seconds` / `null_ttl_seconds` | `30` / `60` / `60` | 列表 / 详情 / 空值哨兵的基准 TTL |
 | `cache` | `jitter_seconds` | `30` | TTL 随机抖动上限（防雪崩，实际 TTL = 基准 + [0,jitter)） |
+| `cache` | `double_delete_ms` | `0` | 5.4 延迟双删：二次 DEL 延迟毫秒数，0=关闭（默认）。>0 时下单失效后延迟再删一次 |
+| `cache` | `bloom_enabled` / `bloom_capacity` / `bloom_error_rate` | `false` / `500000` / `0.001` | 5.7 布隆开关 / 预期元素数 / 允许误判率。开启后需 `warm {"rebuild_bloom":true}` 构建才生效（fail-open） |
+| `cache` | `local_enabled` / `local_capacity` | `false` / `4096` | 5.8 L1 本地 LRU 开关 / 容量（条目数）。开启后读路径 L1→L2(Redis)→L3(DB) |
 | `cache` | `invalidate_on_order` | `item` | 下单后失效范围：`item`（默认，只删详情）/ `all`（详情+列表）/ `none`（只等 TTL） |
 
 ### 7.5 Redis key 约定（排障时直接查）
