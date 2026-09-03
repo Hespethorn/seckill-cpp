@@ -2,6 +2,7 @@
 #include <drogon/orm/DbClient.h>
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>

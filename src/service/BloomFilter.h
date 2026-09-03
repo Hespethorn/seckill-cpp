@@ -100,9 +100,6 @@ public:
     }
 
 private:
-    BloomFilter(std::size_t bits, int hashes)
-        : bits_((bits + 63) / 64), bitsCount_(bits), hashes_(hashes) {}
-
     void setBit(std::size_t idx) {
         bits_[idx >> 6] |= (uint64_t{1} << (idx & 63));
     }
@@ -110,6 +107,12 @@ private:
         return (bits_[idx >> 6] & (uint64_t{1} << (idx & 63))) != 0;
     }
 
+protected:
+    // create() 用 Maker 子类构造（位参数只能由 create 按公式推导，不对外暴露）。
+    BloomFilter(std::size_t bits, int hashes)
+        : bits_((bits + 63) / 64), bitsCount_(bits), hashes_(hashes) {}
+
+private:
     // splitmix64：一个足够好的 64 位整数混合器，任何 64 位输入都均匀散开。
     // 用它生成两路独立哈希（h1、h2 = splitmix64(x ^ 固定盐)），再做双哈希。
     static uint64_t splitmix64(uint64_t x) {
