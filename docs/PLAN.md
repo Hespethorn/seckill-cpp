@@ -3,6 +3,8 @@
 > 本文件是项目**内部计划与进度跟踪**，承载路线图、技术决策、实测基线与开发排障。
 > `README.md` 只做项目门面（简介 / 快速开始 / 接口缩略 / 目录），不重复此处内容。
 > 约定：**项目先行，博客随后，不持续同步**——代码 / 测试先落地验证，博客章节随后补写。
+>
+> 专项规格文档：[`docs/CACHE-DESIGN.md`](CACHE-DESIGN.md)（第五章缓存层：Key 规范 / TTL / 失效策略 / 压测方法）。
 
 ---
 
@@ -25,7 +27,7 @@
 | 阶段 | 版本 | 手段 | 预期 QPS | 本仓库对应 | 状态 |
 | --- | --- | --- | --- | --- | --- |
 | 1 | `v0.1.x` | 直接打数据库（事务 + 原子扣减） | ~50（实测 ≈371 基线） | 二/三/四章 | 收尾中 |
-| 2 | `v0.2.x` | Redis 预扣减 + 异步落库 | 数千 | 五章 | 待开始 |
+| 2 | `v0.2.x` | Redis 缓存 + 预扣减 + 异步落库 | 数千 | 五章 | 进行中（5.1~5.3 代码+压测完成：20万条 JMeter 实测 on/off 提升 ×1.40(list)/×1.44(detail)，命中率 83.8%，DB 读负载降约 77%；5.1~5.3 博客已写） |
 | 3 | `v0.3.x` | MQ 削峰填谷 | 数万 | 六章 | 待开始 |
 | 4 | `v1.0.0` | 微服务 + 限流 / 治理 | 30000+ | 七/八章 | 待开始 |
 
@@ -34,7 +36,7 @@
 | 代码阶段 | 版本 | 预期 QPS | 覆盖博客章节 | 状态 |
 | --- | --- | --- | --- | --- |
 | 阶段一 | `v0.1.x` | ≈371（实测基线，官方 JMeter） | 二（表设计/搭建）、三（登录模块）、四（基础秒杀） | 收尾中 |
-| 阶段二 | `v0.2.x` | 数千 | 五（缓存层 Redis） | 待开始 |
+| 阶段二 | `v0.2.x` | 数千 | 五（缓存层 Redis） | 进行中（5.1~5.3 代码+压测完成：20万条 JMeter 实测 on/off 提升 ×1.40(list)/×1.44(detail)，命中率 83.8%，DB 读负载降约 77%；5.1~5.3 博客已写） |
 | 阶段三 | `v0.3.x` | 数万 | 六（MQ 削峰填谷） | 待开始 |
 | 阶段四 | `v1.0.0` | 30000+ | 七（Lua 原子预扣）、八（防刷限流） | 待开始 |
 
@@ -85,16 +87,20 @@
 
 > 当前 `/api/seckill` 已实现 4.1/4.2/4.3/4.6/4.8 核心逻辑（查询 + 原子扣减 + 幂等 + 应用层闸门），但博客文章 4.1/4.2/4.3/4.6/4.4/4.5/4.7/4.8 尚未写；代码侧超卖 / 重复下单已解决并实测验证（correct 模式 0 超卖、baseline QPS≈371），文章按"项目先行、博客随后"约定待产出。
 
-### 第五章 引入缓存层：读性能优化（阶段二 `v0.2.x`，redis-plus-plus）— 待开始
+### 第五章 引入缓存层：读性能优化（阶段二 `v0.2.x`）— 进行中（5.1~5.3 代码+压测完成：20万条 JMeter 实测 ×1.40/×1.44、命中率 83.8%，5.1~5.3 博客已写）
 
-- [ ] 5.1 缓存 Key 设计规范与接口基线压测 — `seckcpp0501`
-- [ ] 5.2 加 Redis 缓存：商品列表接口 — `seckcpp0502`
-- [ ] 5.3 加 Redis 缓存：商品详情接口 — `seckcpp0503`
+- [x] 5.1 缓存 Key 设计规范与接口基线压测 — `seckcpp0501` — ✅ 规范落地（**[`docs/CACHE-DESIGN.md`](CACHE-DESIGN.md)** + `service/CacheKeys.h`）；压测脚本就绪（`scripts/read-bench.sh` + `jmeter/read-baseline.jmx`），**实测数字已回填 §5.3**（20万条 JMeter：on/off ×1.40(list)/×1.44(detail)，命中率 83.8%）
+- [x] 5.2 加 Redis 缓存：商品列表接口 — `seckcpp0502` — ✅ 代码完成（`SkuCache::getList/setList` + `SeckillService::listSkus` Cache-Aside）
+- [x] 5.3 加 Redis 缓存：商品详情接口 — `seckcpp0503` — ✅ 代码完成（含空值哨兵，顺带落地 5.6 的一半）+ 下单提交后按配置失效（默认只删详情）
 - [ ] 5.4 缓存一致性：Cache-Aside / 延迟双删 — `seckcpp0504`
 - [ ] 5.5 缓存预热与动态 TTL — `seckcpp0505`
-- [ ] 5.6 防缓存穿透：空值策略 — `seckcpp0506`
+- [ ] 5.6 防缓存穿透：空值策略 — `seckcpp0506` — **空值哨兵已随 5.3 落地**（`SkuCache::setNull`，TTL 60s），章节正文待补
 - [ ] 5.7 防缓存穿透：布隆过滤器 — `seckcpp0507`
 - [ ] 5.8 本地缓存（自实现 LRU）做多级缓存 — `seckcpp0508`
+
+> 加缓存的对象是**读**接口（列表 / 详情），下单接口只多一步"提交成功后失效缓存"。
+> 规格细节（Key 规范、TTL、失效范围取舍、fail-open 论证、已知不足）全部收敛在
+> **[`docs/CACHE-DESIGN.md`](CACHE-DESIGN.md)**，本文件不重复。
 
 ### 第六章 消息队列削峰填谷（阶段三 `v0.3.x`，AMQP-CPP）— 待开始
 
@@ -148,6 +154,7 @@
 | ADR-4 | 前端延后到阶段四之后 | 2026-09-02 | 老周拍板，记录于文档重构 |
 | ADR-5 | Drogon 1.9.x 回调式 vs 协程 | 2026-08-28 | `897262e` / `3aa3b31` / `589cb5e` |
 | ADR-6 | 同 IP 注册频控（自签发模式下的批量注册防护） | 2026-09-02 | 代码落地于本次会话（新增 `service/RegisterGuard.*`） |
+| ADR-7 | 缓存 Key 规范与失效范围取舍（第五章 5.1~5.3） | 2026-09-03 | 代码落地于本次会话（`service/CacheKeys.h`、`SkuCache.*`、规范见 `docs/CACHE-DESIGN.md`） |
 
 > 决策日志索引：每条 ADR 的"拍板日 + 落地 commit"见上表；下方各节附详细论证。
 
@@ -241,11 +248,32 @@ Drogon 的 IO 线程上只允许非阻塞操作，下面这处是同步阻塞的
 - 计数**成功注册数**（不是尝试数）：约束的是"一个 IP 能建几个账号"。计尝试数会被错误验证码刷爆配额（DoS 掉正常用户名额），与本意相悖。
 - 固定窗口 `INCR + 首次 EXPIRE`（Lua 原子），Redis 存共享计数——多实例部署语义不变（与 `LoginGuard` 同理）。
 - **fail-open**：Redis 不可用时放行，频控属可用性维度，宁可放过不可误杀正常注册（对比鉴权 `SessionStore::exists` 的 fail-close）。
-- 闸门放在 `registerUser` **最前面**，连手机号格式校验前先拦；IP 来自 `req->getClientIp()`（真实部署走代理时取 X-Forwarded-For，需在 Drogon 配 `trusted_proxies`），空则回退 `getPeerAddr().toIp()`。
+- 闸门放在 `registerUser` **最前面**，连手机号格式校验前先拦；IP 由 `UserController::clientIp()` 提供——手动解析 `X-Forwarded-For` 首段（去空白），真实部署走代理时取真实客户端 IP，空则回退 `req->getPeerAddr().toIp()`。**注意**：Drogon 1.9.10 的 `HttpRequest` 只有 `getPeerAddr()`（返回 TCP 对端地址，走反代时拿到的是代理 IP），**没有** `getClientIp()` / `getRealIp()` 之类的内建方法；取反代后真实客户端 IP 必须自己解析请求头，这是本项目踩过的编译坑。
 - 阈值默认 `max_per_ip=5` / `window_seconds=3600`，走 `config.json` 的 `register_limit`，随业务可调。
 - 拒绝码 `REGISTER_IP_LIMITED` → HTTP 429。
 
 **效果**：自签发验证码模式 + 同 IP 注册频控，二者结合即可在真实部署下站住脚——既不用接短信网关，又能堵住批量刷号。
+
+### ADR-7 缓存 Key 规范与失效范围取舍（第五章 5.1~5.3）
+
+> 决策日：2026-09-03 ｜ 落地：本次会话（`service/CacheKeys.h` + `service/SkuCache.*`）
+> 完整规格见 **[`docs/CACHE-DESIGN.md`](CACHE-DESIGN.md)**，此处只记三个"拍板时刻"。
+
+**① Key 统一收敛到一个文件**（`CacheKeys.h`）。散落在业务代码里硬拼字符串，后果是：想清一类缓存只能 `FLUSHDB`（顺手踢掉所有人的登录态）；改一次命名要全局 grep；没人知道某个 key 是否存在。集中之后这个文件就是缓存的"目录"，也是压测时 `redis-cli` 里直接敲的那几个字符串。
+
+**② 新增 key 一律 `<prefix>:<biz>:<version>:<type>[:<id>]` 带版本号，历史 key 不动。** 第三章引入的 `sess:` / `sms:*` / `login:*` / `reg:ip:` 没有前缀与版本，是既有事实。改它们要同时动会话、验证码、限流四个模块，收益为零、风险不小。**规矩从第五章生效**，历史 key 留到阶段四统一迁移——这是"承认历史包袱但不被它绑架"。
+
+**③ 下单后失效范围默认只删详情（`invalidate_on_order: item`），不删列表。** 这是本次最实际的取舍：
+
+| 策略 | 命中率 | 代价 |
+| --- | --- | --- |
+| `item`（默认） | 高 | 列表页 stock 允许陈旧——真实秒杀列表页本就该静态化，"还剩几件"对下单决策没有意义 |
+| `all` | **趋零** | 列表是全量聚合 key，任意 sku 成交都删它，写 QPS 一高这个 key 等于不存在 |
+| `none` | 最高 | 售罄后用户最长 TTL 秒内仍看到"还有货" |
+
+把这个选择做成配置项而不是写死，是因为它本质是"新鲜度 ↔ 命中率"的交换，不同业务答案不同。
+
+**④ 缓存必须 fail-open**（对比 `SessionStore` 的 fail-close）：错放一次缓存 = 多查一次库（无正确性损失），错放一次会话 = 被封禁 token 能下单（安全事件）。判据是**误放的代价 vs 误杀的代价**。
 
 ---
 
@@ -296,6 +324,65 @@ Drogon 的 IO 线程上只允许非阻塞操作，下面这处是同步阻塞的
 - **各后端表现**：dup 场景 QPS 相比 none 提升 —— mutex **+11.1%**（924.2）、spin **+39.5%**（1160.2，临界区仅百纳秒、无上下文切换，收益最大）、atomic **+20.8%**（1005.2）。闸门把无效请求挡掉后，原本被这些请求占用的 DB 连接/行锁让出来，整体吞吐反而更高。
 - **atomic 的代价**：位图 `fetch_or` **不精确**——dup 场景「挡掉=1501」比实际重复数 1500 多 1，即 hash 冲突误杀了一个正常请求（unique 场景也出现 1 个 409）。生产环境若选 atomic，需接受这个极低误杀率，或调大 bits/shards 降低冲突概率。
 - **选哪个**：通用默认 `mutex`（精确、无误杀）；临界区极短且线程数≈核数可上 `spin`（延迟最低）；`atomic` 只在对延迟极度敏感、且能容忍偶发误杀时用。
+
+### 5.3 读接口基线：商品列表 / 商品详情（第五章 5.1）
+
+同一套流量跑两轮、只改 `cache.enabled` 一个变量：
+
+```bash
+mysql -h127.0.0.1 -useckill -pseckill seckill < sql/seed_sku.sql   # 默认 20 万条商品（id 1..200000）
+bash scripts/read-bench.sh            # 总并发 100（列表 60 / 详情 40）× 60s
+```
+
+> **数据量级**：`seed_sku.sql` 默认 **20 万条**（连续 id，幂等不覆盖 stock，数字表 CROSS JOIN 生成，MySQL 5.7+ 兼容）。列表接口 `LIMIT 100` 仍只返回前 100 条、value ≈ 13KB，**不随总量爆炸**；详情随机打 `1..200000` 共 20 万个 key，缓存 key 基数才贴近真实热点/长尾。下面给出**两个量级**的实测对照：小数量级（20 条）是迁移前基线、仅验证缓存逻辑正确；**20 万条（纯 JMeter 引擎）才是本章权威结论**——本地 20 条对照组太强会掩盖缓存收益，真实量级下才看得到乘数级提升。
+
+#### 小数据量级（20 条，curl harness 回退）— 仅验证逻辑
+
+| 接口 | 缓存 | 样本 | QPS | avg(ms) | p50(ms) | p95(ms) | p99(ms) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| list | off | 87809 | 1463.4 | 1.1 | 0.8 | 2.7 | 4.5 |
+| list | on | 91616 | 1526.7 | 1.0 | 0.7 | 2.7 | 4.5 |
+| detail | off | 88372 | 1472.7 | 0.9 | 0.7 | 2.3 | 4.2 |
+| detail | on | 92396 | 1539.7 | 0.8 | 0.5 | 2.4 | 4.3 |
+
+- 命中率 100%（hit=184014 / miss=3）；err=0；列表 TTL 44s（30s+抖动）；空值哨兵 `/api/seckill/999999` → `__nil__` TTL 78s。
+- 提升倍数：list ×1.04（+4%）、detail ×1.05（+5%）。**这 +4~5% 不是缓存没用，是本地 20 条的「对照组」太强**（见下结论）。
+
+#### 真实数据量级（20 万条，JMeter 5.6.3 引擎）— 权威结论
+
+`wsl -e env LANG=C.UTF-8 JMETER_BIN=/opt/apache-jmeter-5.6.3/bin/jmeter bash scripts/read-bench.sh 100 60`，列表 60 / 详情 40 并发 ×60s：
+
+| 接口 | 缓存 | 样本 | QPS | avg(ms) | p50(ms) | p95(ms) | p99(ms) |
+| --- | --- | --- | --- | --- | --- | --- | --- |
+| list | off | 452687 | 7544.2 | 6.95 | 7.00 | 9.00 | 12.00 |
+| list | on | 633476 | 10556.9 | 3.84 | 3.00 | 7.00 | 9.00 |
+| detail | off | 335555 | 5591.2 | 6.22 | 6.00 | 8.00 | 11.00 |
+| detail | on | 481528 | 8023.5 | 3.23 | 3.00 | 7.00 | 10.00 |
+
+| 观测项 | 值 |
+| --- | --- |
+| on 轮命中率 | 83.8%（hit=934466 / miss=180538 / err=0） |
+| DB 回源对比 | off 轮 60s 内 ≈788k 次读全打 MySQL；on 轮同窗口仅 180k 次回源（其余 93.4 万由缓存挡下），**DB 读负载下降约 77%，同时总 QPS +40~44%** |
+| Redis 异常（err） | 0（缓存确实生效，非假象） |
+| 列表 key 剩余 TTL | 基准 30s + 抖动（脚本实测在此区间） |
+| 空值哨兵 | `/api/seckill/200001` 后 Redis 写入 `__nil__`，TTL 84s（60s + 抖动） |
+
+**提升倍数（on 相对 off，20 万量级）**：list ×1.40（+40%）、detail ×1.44（+44%）。
+
+> 口径自洽：`on` 轮 QPS 更高，所以 60s 内样本数比 off 轮更多（list 633k vs 452k、detail 481k vs 335k）；on 轮总样本 1,115,004 = hit(934,466) + miss(180,538)，数字闭合。
+
+**结论解读（这章最该讲清的点）**：
+
+- **数据量级决定缓存收益的「能见度」**。小数据量级（20 条）下 MySQL 一次 SELECT 本就 <1ms，缓存只是把「1ms 查询」换成「亚毫秒 Redis GET」，单请求省的时间被 `threads_num=4` 的 IO 线程与压测并发模型摊平，QPS 只动 4~5%；但缓存真正的 KPI 是「保护数据库」——20 条量级 on 轮 18 万次读里仅 3 次回源（降载 99.998%）。
+- **量级一上去，缓存从「降载」变成「乘数级 QPS」**：20 万量级下 key 空间放大了 miss 回源的代价（DB 查的数据更杂、连接更紧张），缓存命中把 83.8% 的读挡在门外，list QPS 从 7544 拉到 10556（+40%）、detail 从 5591 拉到 8023（+44%），**平均延迟还砍半**（list 6.95→3.84ms、detail 6.22→3.23ms）。这印证博客要讲的核心：真实部署里 MySQL 在远端、有连接池上限、洪峰读放大会先打满 DB，**缓存挡掉的不是 4% 的 QPS，是 83.8% 可能压垮 DB 的读流量**。
+- **run 1 / run 2 的「−20%」是脏数据，不可信**：那两轮虽设了 `JMETER_BIN`，但 JMeter 因 WSL 代理（`JAVA_TOOL_OPTIONS`/`_JAVA_OPTIONS` 注入的 `-Dhttp.proxyHost`）0 样本、回退到 curl harness；脚本又另起一个 curl 进程抢 8080 端口，热路径退化 + 20 万 key 仅预热 1% 导致大量 miss 回源，最终 on 比 off 还低 20%、命中率仅 58%。**run 3 用纯 JMeter 干净环境（`wsl -e env ... JMETER_BIN=...` 不带代理注入）才拿到可信的 +40%/+44%**——所以「缓存提升反直觉地为负」一定是压测链路错配，不是代码问题。
+- **空值哨兵在 20 万量级仍正确**：`/api/seckill/200001`（连续 id 下必超范围）写入 `__nil__`、TTL 84s，证明 5.6 的防穿透逻辑在大 key 空间下不漏。
+
+**JMeter 路径（run 3 已生效）**：`seed_sku.sql` 改 20 万条 + 干净 WSL 环境（无代理变量）后，`JMETER_BIN` 指到的 Apache JMeter 5.6.3 正常采样、出 HTML 报告（`jmeter/out/read-report/index.html`）+ 聚合 `statistics.json`。关键避坑：WSL 上 `JAVA_TOOL_OPTIONS`/`_JAVA_OPTIONS` 里的 `-Dhttp.proxyHost` 会把 Java 采样器路由到代理端口导致 0 样本；脚本已 `unset` 这些变量，最稳还是用 `wsl -e env LANG=C.UTF-8 JMETER_BIN=...` 起一个没有代理注入的会话。5.6.3 的聚合器写的是 `statistics.json`（JsonExporter），不是 `statistics.csv`，`AGG` 路径已对齐。
+
+> 口径说明：`on` 轮先预热再压，测的是**稳态命中**；`miss` 即回源 DB 次数。
+> 压测前后各读一次 `/api/cache/stats` 取差值，避免把预热阶段的计数算进来。
+> 坑位：两轮数字完全一样 → 先确认服务端的 `enabled` 是否真的跟着变了（改 config 没重启 = 白跑一轮）。
 
 ---
 
@@ -386,7 +473,10 @@ SHOW PROCESSLIST;
 | --- | --- | --- | --- |
 | GET | `/api/health` | 健康检查 | — |
 | POST | `/api/seckill` | 秒杀下单（**不校验 token**，`userId` 走 body；鉴权接入留待前端阶段） | MySQL |
+| GET | `/api/seckill/list` | 商品列表（5.2 起走 Redis 缓存） | MySQL（+Redis） |
+| GET | `/api/seckill/{skuId}` | 商品详情（5.3 起走 Redis 缓存，含空值哨兵） | MySQL（+Redis） |
 | GET | `/api/lock/stats` | 4.8 在途闸门统计（mode / acquired / rejected） | — |
+| GET | `/api/cache/stats` | 5.1 缓存命中率（hit / miss / err / write / hit_rate + 实际 key 与 TTL） | Redis |
 | POST | `/api/sms/send` | 发送短信验证码 | **Redis** |
 | POST | `/api/user/register` | 注册（默认需验证码） | MySQL + Redis |
 | POST | `/api/user/login` | 登录，返回 Bearer Token | MySQL + Redis |
@@ -469,6 +559,11 @@ bash scripts/verify-auth.sh 13800001111 abc123
 | `login_guard` | `max_fail` / `lock_seconds` | `5` / `600` | 密码错误阈值与锁定时长 |
 | `auth` | `require_sms_on_register` / `require_sms_on_login` / `min_password_length` | `true` / `false` / `6` | 是否强制验证码、密码最小长度 |
 | `seckill_lock` | `mode` / `shards` / `bits` | `none` / `64` / `65536` | 4.8 闸门：`none`/`mutex`/`spin`/`atomic` |
+| `cache` | `enabled` | `true` | 5.1 缓存总开关（`false` = 接口基线，两轮压测就靠它切换） |
+| `cache` | `key_prefix` / `key_version` | `seckill` / `v1` | Key 前缀与结构版本号（改结构就升版本，不清库） |
+| `cache` | `list_ttl_seconds` / `detail_ttl_seconds` / `null_ttl_seconds` | `30` / `60` / `60` | 列表 / 详情 / 空值哨兵的基准 TTL |
+| `cache` | `jitter_seconds` | `30` | TTL 随机抖动上限（防雪崩，实际 TTL = 基准 + [0,jitter)） |
+| `cache` | `invalidate_on_order` | `item` | 下单后失效范围：`item`（默认，只删详情）/ `all`（详情+列表）/ `none`（只等 TTL） |
 
 ### 7.5 Redis key 约定（排障时直接查）
 
@@ -480,4 +575,22 @@ sms:code:{phone}        验证码（校验通过即删除，一次性）
 sms:cd:{phone}          重发冷却标记
 sms:try:{phone}         该验证码已试错次数
 sms:day:{phone}:{yyyyMMdd}  当日已发条数（TTL 到次日 0 点）
+reg:ip:{ip}                 同 IP 成功注册计数（固定窗口）
+
+# 第五章起的新规范：<prefix>:<biz>:<version>:<type>[:<id>]（构造入口 service/CacheKeys.h）
+seckill:sku:v1:list         商品列表（全量，紧凑 JSON，TTL = 30s + 抖动）
+seckill:sku:v1:item:{id}    商品详情 / 空值哨兵 __nil__（TTL = 60s + 抖动）
+seckill:sku:v1:stock:{id}   库存计数（阶段四 7.2 预留，当前不读写）
 ```
+
+排障速查：
+
+```bash
+redis-cli GET  seckill:sku:v1:item:1        # 看详情缓存内容
+redis-cli TTL  seckill:sku:v1:list          # 剩余 TTL（基准 30s + 抖动，验证抖动生效）
+redis-cli GET  seckill:sku:v1:item:999999   # 查过不存在的 id 后应为 __nil__（空值哨兵）
+redis-cli --scan --pattern 'seckill:sku:v1:*'   # 按前缀扫（生产禁用 KEYS）
+curl -s localhost:8080/api/cache/stats      # 命中率与回源次数
+```
+
+全量 key 清单与规范论证见 **[`docs/CACHE-DESIGN.md`](CACHE-DESIGN.md) §2.3**。
