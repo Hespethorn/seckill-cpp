@@ -85,6 +85,12 @@ private:
 
 SkuCache::SkuCache(drogon::nosql::RedisClientPtr redis, CacheKeys keys, Config cfg)
     : redis_(std::move(redis)), keys_(std::move(keys)), cfg_(cfg) {
+    // 5.8 L1 本地 LRU：多级缓存的第一级。命中走内存，省掉 L2 Redis 的网络往返。
+    // 与 Redis 无依赖（进程内结构），但整体仍在 cache.enabled 之下（见 get）。
+    if (cfg_.localEnabled) {
+        local_ = std::make_unique<LocalLruCache>(cfg_.localCapacity);
+        SK_LOG_INFO << "cache L1 local-lru enabled: capacity=" << cfg_.localCapacity;
+    }
     // doubleDeleteMs > 0 才拉起延迟删除线程；0 是默认（单 DEL + TTL 自愈已够用）。
     // 线程的 fire 回调直接落到本类的 del()：延迟线程析构先于 redis_（成员逆序析构），
     // 所以 join 期间访问 redis_ 是安全的。
@@ -123,6 +129,18 @@ void SkuCache::get(const std::string &key, GetCallback &&cb) {
     if (!cfg_.enabled || !redis_) {
         cb(false, std::string());
         return;
+    }
+    // ── 5.8 L1：先查本地 LRU（同步，命中省一次 Redis 网络往返）───────────
+    // 命中直接回调返回，不回源；计数 hit 与 localHit 都加（localHit ⊆ hit，
+    // 供 /api/cache/stats 观察 L1 分担了多少命中）。
+    if (local_) {
+        auto v = local_->get(key);
+        if (v) {
+            hit_.fetch_add(1, std::memory_order_relaxed);
+            localHit_.fetch_add(1, std::memory_order_relaxed);
+            cb(true, *v);
+            return;
+        }
     }
     redis_->execCommandAsync(
         [this, cb](const drogon::nosql::RedisResult &r) {
@@ -164,6 +182,8 @@ void SkuCache::setex(const std::string &key, const std::string &value, int ttlSe
             SK_LOG_ERROR << "CACHE_SET_FAILED key=" << key << " err=" << e.what();
         },
         "SETEX %s %d %s", key.c_str(), ttlSeconds, value.c_str());
+    // 5.8 L1：同步写本地（TTL 与 Redis 同值，失效语义一致）
+    if (local_) local_->put(key, value, ttlSeconds);
 }
 
 void SkuCache::del(const std::string &key) {
@@ -175,6 +195,8 @@ void SkuCache::del(const std::string &key) {
             SK_LOG_ERROR << "CACHE_DEL_FAILED key=" << key << " err=" << e.what();
         },
         "DEL %s", key.c_str());
+    // 5.8 L1：下单失效必须同步删本地，否则本地残留旧值（窗口期读脏）
+    if (local_) local_->del(key);
 }
 
 void SkuCache::getList(GetCallback &&cb) {
@@ -220,6 +242,11 @@ void SkuCache::invalidate(int64_t skuId) {
                          << " err=" << e.what();
         },
         "DEL %s %s", itemKey.c_str(), listKey.c_str());
+    // 5.8 L1：与 Redis 同步删本地（否则单实例下本地残留旧 stock）
+    if (local_) {
+        local_->del(itemKey);
+        local_->del(listKey);
+    }
     // 5.4 延迟双删：DEL 之后还有一段"旧值回填窗口"（读请求在 DEL 前读到旧值、
     // 在 DEL 后才回写）。延时到点后把同一组 key 再删一次，清掉窗口内回填的旧值。
     scheduleDelayedDelete({itemKey, listKey});
@@ -256,6 +283,7 @@ void SkuCache::invalidateList() {
 SkuCache::Stats SkuCache::stats() const {
     Stats s;
     s.hit = hit_.load(std::memory_order_relaxed);
+    s.localHit = localHit_.load(std::memory_order_relaxed);
     s.miss = miss_.load(std::memory_order_relaxed);
     s.err = err_.load(std::memory_order_relaxed);
     s.write = write_.load(std::memory_order_relaxed);

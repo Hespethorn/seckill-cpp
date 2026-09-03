@@ -23,6 +23,7 @@
 #include <drogon/nosql/RedisClient.h>
 
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -30,6 +31,7 @@
 #include <vector>
 
 #include "CacheKeys.h"
+#include "LocalLruCache.h"
 
 namespace seckill::cache {
 
@@ -53,6 +55,8 @@ public:
         int nullTtlSeconds = 60;    // 空值占位（防穿透 5.6），必须短
         int jitterSeconds = 30;     // TTL 随机抖动上限，防同时失效（雪崩）
         int doubleDeleteMs = 0;     // 5.4 延迟双删：二次 DEL 的延迟毫秒数，0=关闭（默认）
+        bool localEnabled = false;  // 5.8 本地 LRU 作 L1（默认关，多级缓存压测时开）
+        std::size_t localCapacity = 4096;  // 5.8 L1 容量（条目数），超限逐出最久未用
         InvalidateOnOrder invalidateOnOrder = InvalidateOnOrder::Item;
     };
 
@@ -117,6 +121,7 @@ public:
     // 没有这几个计数器，"缓存到底生效了没有"就只能靠感觉。压测时看 hit/(hit+miss)。
     struct Stats {
         uint64_t hit = 0;
+        uint64_t localHit = 0;    // 5.8 L1 本地命中数（hit 的一部分，用于看 L1 分担比例）
         uint64_t miss = 0;
         uint64_t err = 0;             // Redis 异常次数（不区分读写）
         uint64_t write = 0;           // 回写次数（含空值占位）
@@ -146,7 +151,12 @@ private:
     struct DelayDeleter;
     std::unique_ptr<DelayDeleter> delayDeleter_;
 
+    // 5.8 L1 本地 LRU（cfg.localEnabled 时才创建）。读写都在 get/setex/del 内同步，
+    // 无需额外生命周期管理。
+    std::unique_ptr<LocalLruCache> local_;
+
     mutable std::atomic<uint64_t> hit_{0};
+    mutable std::atomic<uint64_t> localHit_{0};  // 5.8 L1 命中（是 hit 的子集）
     mutable std::atomic<uint64_t> miss_{0};
     mutable std::atomic<uint64_t> err_{0};
     mutable std::atomic<uint64_t> write_{0};

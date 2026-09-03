@@ -133,6 +133,9 @@ AppBundle buildBundle() {
         cacheCfg.nullTtlSeconds = cfgInt(c, "null_ttl_seconds", 60);
         cacheCfg.jitterSeconds = cfgInt(c, "jitter_seconds", 30);
         cacheCfg.doubleDeleteMs = cfgInt(c, "double_delete_ms", 0);  // 5.4，0=关
+        cacheCfg.localEnabled = cfgBool(c, "local_enabled", false);  // 5.8 L1
+        cacheCfg.localCapacity =
+            static_cast<std::size_t>(cfgInt(c, "local_capacity", 4096));
         cacheCfg.invalidateOnOrder =
             parseInvalidateOnOrder(cfgStr(c, "invalidate_on_order", "item"));
 
@@ -147,6 +150,8 @@ AppBundle buildBundle() {
                  << " detailTTL=" << cacheCfg.detailTtlSeconds
                  << " jitter=" << cacheCfg.jitterSeconds
                  << " doubleDeleteMs=" << cacheCfg.doubleDeleteMs
+                 << " localL1=" << (cacheCfg.localEnabled ? 1 : 0)
+                 << "(" << cacheCfg.localCapacity << ")"
                  << " invalidateOnOrder=" << invalidateName(cacheCfg.invalidateOnOrder)
                  << " keyPrefix=" << keys.prefix() << ":" << keys.version();
     }
@@ -324,6 +329,7 @@ int main() {
                 d["err"] = Json::UInt64(s.err);
                 d["write"] = Json::UInt64(s.write);
                 d["delayed_delete"] = Json::UInt64(s.delayedDelete);
+                d["local_hit"] = Json::UInt64(s.localHit);
                 d["hit_rate"] = total > 0 ? static_cast<double>(s.hit) / static_cast<double>(total) : 0.0;
                 d["keys"]["list"] = cache->keys().list();
                 d["keys"]["item_sample"] = cache->keys().item(1);
@@ -332,6 +338,8 @@ int main() {
                 d["ttl"]["null"] = cache->config().nullTtlSeconds;
                 d["ttl"]["jitter"] = cache->config().jitterSeconds;
                 d["double_delete_ms"] = cache->config().doubleDeleteMs;
+                d["local_enabled"] = cache->config().localEnabled;
+                d["local_capacity"] = Json::UInt64(cache->config().localCapacity);
                 d["invalidate_on_order"] = invalidateName(cache->config().invalidateOnOrder);
                 // 5.7 布隆过滤器状态：rejected 是被布隆挡掉的请求数（防穿透的直接度量）
                 const auto bs = bundle().svc->bloomStats();

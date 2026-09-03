@@ -58,6 +58,8 @@
       "bloom_enabled": false,
       "bloom_capacity": 500000,
       "bloom_error_rate": 0.001,
+      "local_enabled": false,
+      "local_capacity": 4096,
       "invalidate_on_order": "item"
     }
   },
