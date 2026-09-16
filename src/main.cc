@@ -159,12 +159,12 @@ AppBundle buildBundle() {
     // 5.7 布隆过滤器配置：capacity 是预期元素数（必须 ≥ 实际 sku 数，否则误判率
     // 上升）；error_rate 为允许误判率。默认关——用 POST /api/cache/warm
     // {"rebuild_bloom":true} 构建后才真正生效（fail-open：未构建时全部放行）。
-    const bool bloomEnabled = cfgBool(c, "bloom_enabled", false);
+    const bool bloomEnabled = cfgBool(cc, "bloom_enabled", false);
     const std::size_t bloomCapacity =
-        static_cast<std::size_t>(cfgInt(c, "bloom_capacity", 500000));
+        static_cast<std::size_t>(cfgInt(cc, "bloom_capacity", 500000));
     const double bloomErrorRate =
-        (c.isMember("bloom_error_rate") && c["bloom_error_rate"].isNumeric())
-            ? c["bloom_error_rate"].asDouble()
+        (cc.isMember("bloom_error_rate") && cc["bloom_error_rate"].isNumeric())
+            ? cc["bloom_error_rate"].asDouble()
             : 0.001;
 
     b.svc = std::make_shared<SeckillService>(

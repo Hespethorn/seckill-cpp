@@ -25,3 +25,13 @@ apache-jmeter-*.tgz.sha512
 
 # lock-bench 持久化服务器日志（排查启动即退用，跑完不删）
 /lock-bench-server.log
+
+# 排障时临时抓的服务端日志（根目录误留，勿提交）
+/server-*.log
+/*.server.log
+
+# 排障用的一次性临时脚本（下划线前缀，非交付物）
+/scripts/_*.sh
+
+# 临时工作目录
+/temp/

@@ -12,7 +12,7 @@
 - **短信验证码（自签发 / 日志模式）**：6 位码 CSPRNG 生成 + Redis 存储 + Lua 原子校验、发送限流、登录失败锁定，不接任何短信网关。
 - **IP 预防（双保险）**：① **同 IP 注册频控**（`service/RegisterGuard.*`）——固定窗口内限制**成功注册数**（默认 5 次 / 小时），Lua 原子 `INCR + 首次 EXPIRE`，Redis 挂时 fail-open 放行，超限返回 HTTP 429；堵住自签发验证码模式下"同 IP 批量注册刷号"。② **反代取真实客户端 IP**（`UserController::clientIp()`）——手动解析 `X-Forwarded-For` 首段，因为 **Drogon 1.9.10 没有 `getClientIp()`**，走反代时不能信 `getPeerAddr()`（那是代理 IP），空则回退 TCP 对端地址。
 - **应用层在途闸门**（`service/InflightGuard.h`，mutex / 自旋 / 原子三后端）挡掉并发窗口内的重复下单，DB 压力降约 75%。
-- **实测基线**：官方 JMeter 压测 **QPS≈371 / p95≈359ms / 0 超卖**，curl harness 交叉验证 ≈341。
+- **实测基线**：官方 JMeter 压测 **QPS≈440（干净态）/ p95≈359ms / 0 超卖**，curl harness 交叉验证 ≈341。
 
 ## 快速开始（WSL / Ubuntu 22.04+）
 
@@ -91,8 +91,8 @@ seckill-cpp/
 
 ## 计划与进度
 
-架构按「50 QPS → 30000+」4 阶段演进，每阶段验收硬指标：**QPS 提升一个量级 + 不超卖 + 不重复下单**。当前处于**阶段一收尾**（`v0.1.x`，基线 QPS≈371）。
+架构按「50 QPS → 30000+」4 阶段演进，每阶段验收硬指标：**QPS 提升一个量级 + 不超卖 + 不重复下单**。当前处于**阶段一收尾**（`v0.1.x`，干净态基线 QPS≈440）。
 
 - 阶段演进路线图、各博客章节 ↔ 代码进度对照 → **[`docs/PLAN.md` §2–§3](docs/PLAN.md)**
-- 技术决策记录（选型变更 / IO 线程阻塞点 / 应用层锁边界 / 前端延后） → **[`docs/PLAN.md` §4](docs/PLAN.md)**
+- 技术决策记录（框架选型 / 选型变更 / IO 线程阻塞点 / 应用层锁边界 / 前端延后） → **[`docs/PLAN.md` §4](docs/PLAN.md)**
 - 实测基线与方法对比数据 → **[`docs/PLAN.md` §5](docs/PLAN.md)**

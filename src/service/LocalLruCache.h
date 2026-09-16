@@ -104,7 +104,7 @@ private:
         list_.pop_back();
     }
 
-    std::mutex m_;
+    mutable std::mutex m_;
     std::size_t capacity_;
     List list_;                                        // 头部=最近使用
     std::unordered_map<std::string, List::iterator> map_;

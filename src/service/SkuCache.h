@@ -23,11 +23,16 @@
 #include <drogon/nosql/RedisClient.h>
 
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "CacheKeys.h"
@@ -146,9 +151,71 @@ private:
     CacheKeys keys_;
     Config cfg_;
 
-    // 延迟删除线程（见 .cc）。前向声明 + unique_ptr 是为了把实现藏进 .cc；
-    // 析构先于 redis_（成员按声明逆序析构），线程退出前不会访问已死的客户端。
-    struct DelayDeleter;
+    // 延迟删除线程（5.4）。专用后台线程消费"到点再删"的任务队列，绝不阻塞
+    // Drogon 的 IO 线程（详情见 .cc 中的论述）。unique_ptr 持有：析构时
+    // 先停线程再析构 redis_（成员声明逆序析构），线程退出前不会访问已死的客户端。
+    class DelayDeleter {
+    public:
+        using FireFn = std::function<void(std::vector<std::string>)>;
+
+        DelayDeleter(std::chrono::milliseconds delay, FireFn fire)
+            : delay_(delay), fire_(std::move(fire)), stop_(false) {
+            thread_ = std::thread([this] { run(); });
+        }
+
+        ~DelayDeleter() {
+            {
+                std::lock_guard<std::mutex> lk(m_);
+                stop_ = true;
+            }
+            cv_.notify_all();
+            if (thread_.joinable()) thread_.join();
+        }
+
+        void schedule(std::vector<std::string> keys) {
+            if (keys.empty()) return;
+            {
+                std::lock_guard<std::mutex> lk(m_);
+                queue_.push_back({std::chrono::steady_clock::now() + delay_,
+                                  std::move(keys)});
+            }
+            cv_.notify_one();
+        }
+
+    private:
+        struct Task {
+            std::chrono::steady_clock::time_point fireAt;
+            std::vector<std::string> keys;
+        };
+
+        void run() {
+            std::unique_lock<std::mutex> lk(m_);
+            while (!stop_) {
+                if (queue_.empty()) {
+                    cv_.wait(lk);
+                    continue;
+                }
+                auto &next = queue_.front();
+                if (std::chrono::steady_clock::now() < next.fireAt) {
+                    cv_.wait_until(lk, next.fireAt);
+                    continue;
+                }
+                auto keys = std::move(next.keys);
+                queue_.pop_front();
+                lk.unlock();  // 执行 DEL 期间不持锁：新任务可以继续入队
+                fire_(std::move(keys));
+                lk.lock();
+            }
+        }
+
+        std::chrono::milliseconds delay_;
+        FireFn fire_;
+        std::mutex m_;
+        std::condition_variable cv_;
+        std::deque<Task> queue_;
+        bool stop_;
+        std::thread thread_;
+    };
     std::unique_ptr<DelayDeleter> delayDeleter_;
 
     // 5.8 L1 本地 LRU（cfg.localEnabled 时才创建）。读写都在 get/setex/del 内同步，
