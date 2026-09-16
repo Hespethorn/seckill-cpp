@@ -7,12 +7,24 @@
 
 ## 特性
 
-- **阶段一已落地**（`v0.1.x`）：Drogon + MySQL 直连，原子 `UPDATE ... WHERE stock>0` 防超卖，事务化幂等下单（`uk_user_sku` 唯一键兜底）。
+**阶段一（`v0.1.x`）：打数据库**
+
+- **Drogon + MySQL 直连**：原子 `UPDATE ... WHERE stock>0` 防超卖，事务化幂等下单（`uk_user_sku` 唯一键兜底）。
 - **自实现登录鉴权**：PBKDF2 加盐哈希、自写 JWT（HS256）、Drogon 内置 Redis 异步客户端可吊销会话——零引入 `redis-plus-plus` / `jwt-cpp` 等同步或需 FetchContent 的依赖。
 - **短信验证码（自签发 / 日志模式）**：6 位码 CSPRNG 生成 + Redis 存储 + Lua 原子校验、发送限流、登录失败锁定，不接任何短信网关。
 - **IP 预防（双保险）**：① **同 IP 注册频控**（`service/RegisterGuard.*`）——固定窗口内限制**成功注册数**（默认 5 次 / 小时），Lua 原子 `INCR + 首次 EXPIRE`，Redis 挂时 fail-open 放行，超限返回 HTTP 429；堵住自签发验证码模式下"同 IP 批量注册刷号"。② **反代取真实客户端 IP**（`UserController::clientIp()`）——手动解析 `X-Forwarded-For` 首段，因为 **Drogon 1.9.10 没有 `getClientIp()`**，走反代时不能信 `getPeerAddr()`（那是代理 IP），空则回退 TCP 对端地址。
 - **应用层在途闸门**（`service/InflightGuard.h`，mutex / 自旋 / 原子三后端）挡掉并发窗口内的重复下单，DB 压力降约 75%。
-- **实测基线**：官方 JMeter 压测 **QPS≈440（干净态）/ p95≈359ms / 0 超卖**，curl harness 交叉验证 ≈341。
+
+**阶段二（`v0.2.x`）：加缓存**
+
+- **读缓存 Cache-Aside**（`service/SkuCache.*` + `service/CacheKeys.h`）：列表 / 详情两接口接 Redis，Key 规范统一收敛到 `seckill:sku:v1:*`；命中率统计走 `/api/cache/stats`。实测 **list ×1.40 / detail ×1.44**、命中率 83.8%、DB 读负载降约 77%。
+- **空值哨兵防穿透**（5.6，随 5.3 落地）：查不到的 id 写 `__nil__` 短 TTL，挡住"打不存在的 key 反弹 DB"。
+- **延迟双删**（5.4，默认关）：`double_delete_ms` 可配，专用后台线程到点二次 DEL（绝不 sleep 在 IO 线程）。
+- **缓存预热**（5.5）：`POST /api/cache/warm` 一次 SQL 重建列表 + 批量预热详情。
+- **布隆过滤器**（5.7，自实现，默认关）：detail 前置过滤不存在的 id，未构建时 fail-open 放行。
+- **本地 LRU 多级缓存**（5.8，自实现，默认关）：L1 本地 + L2 Redis + L3 MySQL，L1 命中省一次网络往返。
+
+**实测基线**：官方 JMeter 压测 **QPS≈440（干净态）/ p95≈359ms / 0 超卖**；缓存后读接口 **list 10557 QPS / detail 8024 QPS**（20 万商品量级）。
 
 ## 快速开始（WSL / Ubuntu 22.04+）
 
@@ -74,6 +86,9 @@ seckill-cpp/
 │   │   ├── SeckillService.*      # 事务化原子扣减（阶段一核心）+ 5.2/5.3 读缓存路径
 │   │   ├── CacheKeys.h           # 5.1 缓存 Key 唯一构造入口（seckill:sku:v1:...）
 │   │   ├── SkuCache.*            # 5.1 商品缓存：异步 GET/SETEX/DEL + 空值哨兵 + 命中统计（fail-open）
+│   │   │                         #   └ 内含 5.4 DelayDeleter（延迟双删线程）/ 5.8 本地 LRU L1
+│   │   ├── BloomFilter.h         # 5.7 自实现布隆过滤器（位数组 + 双哈希，防穿透前置过滤）
+│   │   ├── LocalLruCache.h       # 5.8 自实现线程安全 LRU（L1 本地缓存）
 │   │   ├── InflightGuard.h       # 4.8 应用层在途闸门（mutex / 自旋 / 原子三后端）
 │   │   ├── password.*            # PBKDF2-HMAC-SHA256 + CSPRNG salt + 常量时间比较
 │   │   ├── Jwt.*                 # 自实现 HS256 签发/校验
@@ -84,15 +99,34 @@ seckill-cpp/
 │   │   ├── SmsService.*          # 验证码生成/限流/原子校验
 │   │   └── UserService.*         # 注册 / 登录 / 登出 / 鉴权
 │   └── logging/              # 异步日志（环形缓冲 + spdlog sink + SK_LOG_* 宏）
-├── sql/                      # schema.sql / user_schema.sql / init_user.sql
-├── scripts/                  # setup-wsl / build-wsl / debug-wsl / smoke-seckill / jmeter-baseline / verify-auth / lock-bench
-└── jmeter/                   # 压测脚本与产物（out/ 为运行副产物，已 gitignore）
+├── sql/                      # schema.sql / user_schema.sql / init_user.sql / seed_sku.sql
+├── scripts/                  # setup-wsl / build-wsl / debug-wsl / smoke-seckill / verify-auth
+│                             #   / jmeter-baseline / read-bench / local-bench / lock-bench
+│                             #   / cache-warm / verify-54-double-delete / verify-57-bloom
+├── jmeter/                   # 压测脚本与产物（out/ 为运行副产物，已 gitignore）
+└── docs/                     # PLAN.md（计划书/ADR/基线）/ CACHE-DESIGN.md（缓存专项规格）
 ```
 
 ## 计划与进度
 
-架构按「50 QPS → 30000+」4 阶段演进，每阶段验收硬指标：**QPS 提升一个量级 + 不超卖 + 不重复下单**。当前处于**阶段一收尾**（`v0.1.x`，干净态基线 QPS≈440）。
+架构按「50 QPS → 30000+」4 阶段演进，每阶段验收硬指标：**QPS 提升一个量级 + 不超卖 + 不重复下单**。
+
+**当前状态：阶段二收官（`v0.2.x`）**——读写两条链路的优化均已完成并实测验证：
+
+| 阶段 | 版本 | 手段 | 状态 |
+| --- | --- | --- | --- |
+| 一 | `v0.1.x` | 直打数据库（事务 + 原子扣减 + 应用层闸门） | ✅ 完成，干净态基线 QPS≈440 |
+| 二 | `v0.2.x` | Redis 读缓存 + 穿透防护 + 多级缓存 | ✅ 完成，list ×1.40 / detail ×1.44 |
+| 三 | `v0.3.x` | MQ 削峰填谷（AMQP-CPP） | 归档（不再排期） |
+| 四 | `v1.0.0` | 微服务 + Lua 预扣 + 限流治理 | 归档（不再排期） |
+
+> 阶段三 / 四的完整规划保留在博客 Master Plan 与 `docs/PLAN.md` §2–§3，作为"未来可续"的路线记录；本项目当前以阶段二收官。
 
 - 阶段演进路线图、各博客章节 ↔ 代码进度对照 → **[`docs/PLAN.md` §2–§3](docs/PLAN.md)**
-- 技术决策记录（框架选型 / 选型变更 / IO 线程阻塞点 / 应用层锁边界 / 前端延后） → **[`docs/PLAN.md` §4](docs/PLAN.md)**
+- 技术决策记录（框架选型 / 选型变更 / IO 线程阻塞点 / 应用层锁边界 / 缓存策略） → **[`docs/PLAN.md` §4](docs/PLAN.md)**
 - 实测基线与方法对比数据 → **[`docs/PLAN.md` §5](docs/PLAN.md)**
+- 缓存层专项规格（Key 规范 / TTL 抖动 / 失效取舍 / 压测方法） → **[`docs/CACHE-DESIGN.md`](docs/CACHE-DESIGN.md)**
+
+## License
+
+[MIT](LICENSE)

@@ -20,23 +20,24 @@
 
 ## 1. 清理调试残留（先做，独立于编译）
 
-- [ ] 删除纯调试脚本：`scripts/_dbg.sh`、`scripts/_dbg2.sh`、`scripts/_restart.sh`、`scripts/_restart2.sh`、`scripts/_restart3.sh`
-- [ ] 处置验证脚本：`_verify54.sh`（延迟双删验证）、`_verify57.sh`（布隆验证）、`_validate.sh` → 内容有复用价值的**去掉 `_` 前缀转正**为 `scripts/verify-*.sh`；纯一次性调试则删
-- [ ] 根目录 `server-*.log`：移入 `logs/`（已被 .gitignore 忽略）或删除
-- [ ] `.gitignore` 增补两行防再犯：`/server-*.log` 与 `/scripts/_*.sh`
+- [x] 删除纯调试脚本：`scripts/_dbg.sh`、`_dbg2.sh`、`_restart.sh`、`_restart2.sh`、`_restart3.sh`
+- [x] 处置验证脚本：`_verify54.sh` → **`scripts/verify-54-double-delete.sh`**、`_verify57.sh` → **`scripts/verify-57-bloom.sh`**（转正 + 修掉原脚本提取 stats 的正则 bug）；`_validate.sh` 属一次性调试，已删
+- [x] 根目录 `server-*.log` ×7：已删除
+- [x] `.gitignore` 增补四行：`/server-*.log`、`/*.server.log`、`/scripts/_*.sh`、`/temp/`
 
 ## 2. 悬置改动验证与提交
 
-- [ ] WSL 里编译绿灯：`bash scripts/build-wsl.sh`（改前确认无 error/warning 新增）
-- [ ] 冒烟：`bash scripts/smoke-seckill.sh`（或手动起服务跑一次秒杀链路）
-- [ ] DelayDeleter 内联化 diff 自审：析构顺序注释是否仍准确、`#include <thread>/<mutex>` 齐全
-- [ ] 通过后提交为一个**收尾 commit**（如 `refactor(cache): DelayDeleter 头文件内联化 + 阶段二文档同步`）
+- [x] DelayDeleter 内联化 diff 自审：`.h` 内已补全 `#include <chrono>/<condition_variable>/<deque>/<mutex>/<thread>`，代码逐字搬迁、行为零改动
+- [x] 附带 `main.cc` 真 bug 修复：布隆配置读取误用 `c` 改为 `cc`（此前 `bloom_*` 三项读不到、恒走默认值）
+- [x] 提交：`7b3ee16 chore: 阶段二收尾清理——调试残留转正/删除 + DelayDeleter 内联化 + main.cc 配置 bug 修复`
+- [ ] WSL 里编译绿灯：`bash scripts/build-wsl.sh`（**待老周执行**）
+- [ ] 冒烟：`bash scripts/smoke-seckill.sh`（**待老周执行**）
 
 ## 3. WSL 实测回填（PLAN.md §5.4 清单）
 
-- [ ] 5.4 延迟双删收益数字（跑 `_verify54.sh` 转正版或手测：删 key 到二次 DEL 的窗口、DB 一致性）
-- [ ] 5.7 布隆过滤器收益数字（`_verify57.sh`：拦截率、误判率、对读接口 RT 影响）
-- [ ] 5.8 本地 L1（自实现 LRU）收益数字（`scripts/local-bench.sh`：命中率、RT、对比纯 L2）
+- [ ] 5.4 延迟双删（`bash scripts/verify-54-double-delete.sh`，脚本自动开关配置、退出时 trap 恢复）
+- [ ] 5.7 布隆过滤器（`bash scripts/verify-57-bloom.sh`：拦截率、误判率、对读接口 RT 影响）
+- [ ] 5.8 本地 L1（自实现 LRU）收益数字（`bash scripts/local-bench.sh`：命中率、RT、对比纯 L2）
 - [ ] 回填 PLAN.md §5.4 清单 + 阶段二状态行改为「**已实测**」
 
 ## 4. 博客 5.4~5.8 补齐（自动化已保活：周一/四 10:00）
@@ -47,21 +48,26 @@
 
 ## 5. 开源库打磨（收官 polish）
 
-- [ ] README：特性补全阶段二（缓存层已落地项）、badges（CI/构建状态）、目录导览、与博客章节对照表
-- [ ] 可选：GitHub CI 工作流（Ubuntu 上编译冒烟，需能装 Drogon 依赖）
-- [ ] LICENSE 文件（MIT 等，需老周确认）
-- [ ] 打收尾 tag（如 `v0.2.0`）——**需老周显式批准**（平时不打 tag 惯例，收官可破例一次）
+- [x] README：特性按阶段一/二分组补全（缓存四项增强 + 实测数字）、进度表注明阶段三/四归档、项目结构与脚本清单更新、LICENSE 段
+- [ ] 可选：GitHub CI 工作流（Ubuntu 上编译冒烟，需能装 Drogon 依赖）——**暂不做**：Drogon 源码编译耗时长（十几分钟/次），收益不抵 CI 成本，改为在本机 WSL 保证绿灯
+- [x] LICENSE 文件（MIT，Copyright 2026 Hespethorn）
+- [ ] 打收尾 tag `v0.2.0`——**需老周显式批准**（平时不打 tag 惯例，收官破例一次）
+  - 注：`v1.0.0` 原先误打在阶段二收尾提交 `47290ea` 上（已推到远端），语义与规划不符——该版本号应属阶段四。本地 tag 已删除；远端 tag 处理见 §7。
 
 ## 6. PLAN.md 定格
 
-- [ ] 阶段三/四行状态改为「**归档：不再排期（2026-09-09 收尾决定）**」或加醒目注记
-- [ ] 阶段一「收尾中」→「已完成」；阶段二 →「**收官（v0.2.x，代码+博客全对齐）**」
-- [ ] ADR 表补一条收尾决定记录
+- [x] 阶段三/四行状态改为「**归档：不再排期**」，并在 §2 顶部加醒目注记
+- [x] 阶段一「收尾中」→「**已完成**」；阶段二 →「**收官**」
+- [x] ADR 表补 ADR-10（项目收官决定，含三条理由与代价），正文附完整论证
+- [x] 第六/七/八章清单加「归档：不再排期」标记
 
 ## 7. 最终发布
 
 - [ ] 全部 commit 后，老周在对话里说「发布」→ 才 push 到 GitHub
 - [ ] 博客 Seckill 系列对应草稿说「发布」→ 才 commit+push 到博客 source 分支
+- [ ] **远端 `v1.0.0` tag 需处理**：它已推到 origin 且指向阶段二收尾（语义错误）。建议方案：
+      `git push origin :refs/tags/v1.0.0` 删除远端 tag，收官时改推 `v0.2.0`。
+      因涉及远端重写，**需老周明确同意后执行**；若你希望保留 v1.0.0 不动，就在收官文档里注明"该 tag 实为阶段二里程碑"。
 
 ## 备注
 
