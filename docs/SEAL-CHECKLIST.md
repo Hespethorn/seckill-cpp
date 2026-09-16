@@ -30,7 +30,7 @@
 - [x] DelayDeleter 内联化 diff 自审：`.h` 内已补全 `#include <chrono>/<condition_variable>/<deque>/<mutex>/<thread>`，代码逐字搬迁、行为零改动
 - [x] 附带 `main.cc` 真 bug 修复：布隆配置读取误用 `c` 改为 `cc`（此前 `bloom_*` 三项读不到、恒走默认值）
 - [x] 提交：`7b3ee16 chore: 阶段二收尾清理——调试残留转正/删除 + DelayDeleter 内联化 + main.cc 配置 bug 修复`
-- [ ] WSL 里编译绿灯：`bash scripts/build-wsl.sh`（**待老周执行**）
+- [x] **WSL 编译绿灯**（2026-09-16）：`bash scripts/build-wsl.sh` → `[17/17] Linking CXX executable src/seckill-cpp`，构建产物 `./build/src/seckill-cpp`。`main.cc` 的 `cc` 修复与 `SkuCache` 内联化均编译通过（增量 17 步）。
 - [ ] 冒烟：`bash scripts/smoke-seckill.sh`（**待老周执行**）
 
 ## 3. WSL 实测回填（PLAN.md §5.4 清单）
