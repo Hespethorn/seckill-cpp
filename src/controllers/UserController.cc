@@ -1,5 +1,6 @@
 #include "UserController.h"
 
+#include <drogon/plugins/RealIpResolver.h>
 #include <json/json.h>
 
 #include <string>
@@ -53,19 +54,19 @@ int statusForFailure(const std::string &msg) {
     return 409;
 }
 
-// 取客户端地址：本 Drogon 版本无 getClientIp()，这里手动解析：
-//   真实部署走反代时，原始客户端 IP 在 X-Forwarded-For 首段（形如 "client, proxy1, proxy2"）；
-//   直连或无该头时回退到 TCP 对端地址。频控以此地址为 key。
+// 取客户端真实地址（同 IP 注册频控以此作 key）。
+//
+// 走 Drogon 官方 RealIpResolver 插件（见 config.json 的 plugins 段）：它在 pre-routing
+// 阶段先校验 TCP 对端是否命中 trust_ips（可信代理），命中才去解析 X-Forwarded-For，
+// 且从右往左跳过代理链、取第一个不可信 IP；不命中则直接采用 TCP 对端地址。
+//
+// ⚠️ 不要自己取 X-Forwarded-For 首段。首段是调用方可任意伪造的值：
+//   ① 直连场景——客户端自己发一个 X-Forwarded-For 就能换掉频控 key，等于频控失效；
+//   ② 反代场景——nginx 的 $proxy_add_x_forwarded_for 是"追加"，伪造值反而被拼在最左边，
+//      取首段拿到的依然是伪造值。
+// 插件未注册时 GetRealAddr 内部回退 getPeerAddr()，属安全降级方向（见上游 RealIpResolver.cc）。
 std::string clientIp(const drogon::HttpRequestPtr &req) {
-    const std::string &xff = req->getHeader("X-Forwarded-For");
-    if (!xff.empty()) {
-        std::string ip = xff.substr(0, xff.find(','));  // 首段即最原始客户端
-        const size_t s = ip.find_first_not_of(" \t");
-        const size_t e = ip.find_last_not_of(" \t");
-        if (s != std::string::npos) ip = ip.substr(s, e - s + 1);
-        if (!ip.empty()) return ip;
-    }
-    return req->getPeerAddr().toIp();
+    return drogon::plugin::RealIpResolver::GetRealAddr(req).toIp();
 }
 
 }  // namespace

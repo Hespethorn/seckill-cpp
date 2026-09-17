@@ -1,4 +1,5 @@
 #include "SeckillController.h"
+#include <drogon/plugins/RealIpResolver.h>
 #include <json/json.h>
 #include <string>
 #include "logging/LogStream.h"
@@ -18,7 +19,8 @@ void SeckillController::seckill(
         // 既便于发现异常调用方，又不会像 error 那样在监控里被当成系统故障告警。
         SK_LOG_WARN << "BAD_REQUEST missing/invalid userId/skuId"
                     << " path=" << req->getPath()
-                    << " remote=" << req->getPeerAddr().toIpPort();
+                    << " remote="
+                    << drogon::plugin::RealIpResolver::GetRealAddr(req).toIpPort();
         reply(std::move(callback), 400, "missing or invalid userId/skuId",
               drogon::k400BadRequest);
         return;

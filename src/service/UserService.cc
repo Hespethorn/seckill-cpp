@@ -67,7 +67,7 @@ void UserService::registerUser(const std::string &phone,
                                std::function<void(bool, const std::string &)> &&cb) {
     // 同 IP 注册频控闸门：固定窗口内只允许有限个成功注册。
     // 放在最前面——被限的 IP 连手机号格式校验都不该再消耗后续资源。
-    // IP 来自控制器（手动解析 X-Forwarded-For 首段，无则取 TCP 对端地址）。
+    // IP 来自控制器（RealIpResolver 插件：先验对端是否可信代理，再从右往左取 XFF 首个不可信 IP）。
     registerGuard_->check(ip,
         [this, phone, password, code, ip, cb = std::move(cb)](bool allowed) mutable {
             if (!allowed) {

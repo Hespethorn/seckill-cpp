@@ -273,7 +273,7 @@ Drogon 的 IO 线程上只允许非阻塞操作，下面这处是同步阻塞的
 - 计数**成功注册数**（不是尝试数）：约束的是"一个 IP 能建几个账号"。计尝试数会被错误验证码刷爆配额（DoS 掉正常用户名额），与本意相悖。
 - 固定窗口 `INCR + 首次 EXPIRE`（Lua 原子），Redis 存共享计数——多实例部署语义不变（与 `LoginGuard` 同理）。
 - **fail-open**：Redis 不可用时放行，频控属可用性维度，宁可放过不可误杀正常注册（对比鉴权 `SessionStore::exists` 的 fail-close）。
-- 闸门放在 `registerUser` **最前面**，连手机号格式校验前先拦；IP 由 `UserController::clientIp()` 提供——手动解析 `X-Forwarded-For` 首段（去空白），真实部署走代理时取真实客户端 IP，空则回退 `req->getPeerAddr().toIp()`。**注意**：Drogon 1.9.10 的 `HttpRequest` 只有 `getPeerAddr()`（返回 TCP 对端地址，走反代时拿到的是代理 IP），**没有** `getClientIp()` / `getRealIp()` 之类的内建方法；取反代后真实客户端 IP 必须自己解析请求头，这是本项目踩过的编译坑。
+- 闸门放在 `registerUser` **最前面**，连手机号格式校验前先拦；IP 由 `UserController::clientIp()` 提供，内部调用 Drogon 官方 `RealIpResolver` 插件的 `GetRealAddr(req)`——插件在 pre-routing 阶段先校验 TCP 对端是否命中 `trust_ips`（可信代理），命中才解析 `X-Forwarded-For` 并从右往左跳过代理链取首个不可信 IP，不命中则直接采用 `req->getPeerAddr()`；插件未注册时 `GetRealAddr` 亦回退 `getPeerAddr()`，属安全降级。**注意**：`HttpRequest` 确实**没有** `getClientIp()` / `getRealIp()` 这样的直接方法（只有 `getPeerAddr()`，返回 TCP 对端地址，走反代时拿到的是代理 IP），但框架**内建**了从 `X-Forwarded-For` 解析真实 IP 的能力——即官方 `RealIpResolver` 插件（`lib/src/RealIpResolver.cc`，v1.9.10 起可用），只是它不在 `HttpRequest` 的方法列表里，翻头文件容易漏掉。**本项目踩过的坑**：初版自行解析 `X-Forwarded-For` 首段，并因此误判为"框架不内建该能力"。而首段是调用方可任意伪造的值：直连场景下一行 header 即可换掉频控 key（频控失效）；反代场景下 nginx 的 `$proxy_add_x_forwarded_for` 是追加语义、伪造值反而被拼在最左，取首段拿到的仍是伪造值。已改用官方插件修正。`trust_ips` 的语义是**「我信任谁的 X-Forwarded-For」**——本项目当前不挂反向代理，故配置为 `[]`（列表为空则 `matchCidr` 永不成立，XFF 一律忽略，无伪造入口）；将来接入 nginx 再填其地址（Docker 网络填网段）。**两个方向都别填错**：填窄了只是频控全量误伤（可用性问题），**填宽了伪造会当场生效**（安全问题）。两相端到端实测（A 相 `[]` 伪造无效 / B 相 `["127.0.0.1"]` 伪造生效）见 `scripts/e2e-311-real-ip.sh`。
 - 阈值默认 `max_per_ip=5` / `window_seconds=3600`，走 `config.json` 的 `register_limit`，随业务可调。
 - 拒绝码 `REGISTER_IP_LIMITED` → HTTP 429。
 
@@ -350,7 +350,7 @@ Drogon 的 IO 线程上只允许非阻塞操作，下面这处是同步阻塞的
 
 **第四件事：选型对不对，实测能自证。** 阶段一干净态基线 ≈ 440 QPS，瓶颈经排查是 **MySQL 行锁串行化**，不是框架；后续每级跃迁（缓存 → MQ 削峰 → Lua 原子预扣）全部来自架构收益，**没有一级来自换框架**。这正是"把瓶颈留在想练的地方"的直接证据。
 
-**第五件事：代价要说全。** 生态薄（C++ Web 框架整体小众）、治理件为零（分布式锁 / 限流 / 注册配置全部自实现，本项目的设计意图）、回调协程双模式历史包袱、不带服务发现与配置中心（阶段四用 brpc + etcd 补）、招人难。典型坑：Drogon 1.9.10 的 `HttpRequest` 只有 `getPeerAddr()`，**没有 `getClientIp()` / `getRealIp()`**，取反代后真实客户端 IP 必须自己解析 `X-Forwarded-For`（已在 3.10 落地）。
+**第五件事：代价要说全。** 生态薄（C++ Web 框架整体小众）、治理件为零（分布式锁 / 限流 / 注册配置全部自实现，本项目的设计意图）、回调协程双模式历史包袱、不带服务发现与配置中心（阶段四用 brpc + etcd 补）、招人难。典型坑：Drogon 1.9.10 的 `HttpRequest` 只有 `getPeerAddr()`，**没有 `getClientIp()` / `getRealIp()`**，但**框架并非不提供该能力**——官方 `RealIpResolver` 插件（`lib/src/RealIpResolver.cc`）就是干这个的，只是它不在 `HttpRequest` 的方法列表里，翻头文件很容易漏掉。本项目初版因此自行解析 `X-Forwarded-For` 首段，踩了「首段可伪造」的坑，后改用插件；同时把 `trust_ips` 收敛为 `[]`——本项目当前不挂反向代理，一个不存在的代理不该出现在信任列表里（配置语义与两相实测见 3.10 / 3.11）。
 
 > 选型判据一句话：选框架不是选"最强的"，而是选**"把你的瓶颈留在你想练的地方"**的那个。
 
